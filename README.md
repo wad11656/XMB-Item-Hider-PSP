@@ -7,4 +7,4 @@ Continuation of Frostegater's project: https://www.gamebrew.org/wiki/XMB_Item_Hi
 #### <ins>Known Limitations:</ins>
 - You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in the `.ini` file--only its contents (`HIDE_ALL_SETTINGS = 1`). The `Settings` category seems to act as the "anchor" for the rest of the categories.
   - `Settings` *does* get hidden with `HIDE_ALL = 2`.
-- Completely hiding any category to the left of the `Game` category can cause buggy behavior with `Game` menu items. (i.e., Duplicated `Memory Stick` entries; Deleted `Resume Game` entries don't disappear until the next full VSH reset.)
+- Completely hiding any category to the left of the `Game` category can cause buggy behavior with `Game` menu items. (i.e., Duplicated `Memory Stick` entries; Deleted `Resume Game` entries don't properly disappear until the next full VSH reset.)
