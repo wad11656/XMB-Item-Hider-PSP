@@ -35,15 +35,11 @@
 #include <kubridge.h>
 #include <string.h>
 #include <stdarg.h>
-#include "logger.h"
 #include "minGlue.h"
 #include "minIni.h"
 
 PSP_MODULE_INFO("XMBIH", 0x0007, 1, 3);
 
-#define XMBIH_LOG_MAX_ITEMS 200
-
-static int xlog_item_count = 0;
 static struct {
 	volatile unsigned char guard[0x200];
 	volatile unsigned char flags[57];
@@ -150,94 +146,14 @@ long strtol(const char *s, char **end, int base)
 	return neg ? -v : v;
 }
 
-/*
- * Hand-rolled logger. NO newlib functions (no vsnprintf / sprintf / stdio):
- * those drag in Kernel_Library / ThreadManForUser / sceNetInet imports that
- * cause the PSP module loader to silently reject a user-mode PRX.
- *
- * va_list / va_arg are compiler builtins, not libc.
- */
-
-static int xstrlen(const char *s)
-{
-	int n = 0;
-	while (s[n]) n++;
-	return n;
-}
-
-static void xwrite(const char *path, const char *buf, int len)
-{
-	SceUID fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
-	if (fd >= 0) {
-		sceIoWrite(fd, buf, len);
-		sceIoClose(fd);
-	}
-}
-
-/* Bootstrap: writes to fixed paths with no dependency on xlog_path being set. */
 static void xlog_raw_both(const char *msg)
 {
-	int len = xstrlen(msg);
-	xwrite("ef0:/xmbih.log", msg, len);
-	xwrite("ms0:/xmbih.log", msg, len);
-}
-
-/* Formatter — supports %s, %d, %x/%X with optional 0-padded width like %08X. */
-static int xfmt(char *buf, int cap, const char *fmt, va_list ap)
-{
-	int p = 0;
-	for (int i = 0; fmt[i] && p < cap - 1; i++) {
-		if (fmt[i] != '%') { buf[p++] = fmt[i]; continue; }
-		i++;
-		/* Optional 0-prefix and width digits, e.g. %08X */
-		int pad_zero = 0;
-		int width = 0;
-		if (fmt[i] == '0') { pad_zero = 1; i++; }
-		while (fmt[i] >= '0' && fmt[i] <= '9') { width = width * 10 + (fmt[i] - '0'); i++; }
-		switch (fmt[i]) {
-			case 's': {
-				const char *s = va_arg(ap, const char *);
-				if (!s) s = "(null)";
-				while (*s && p < cap - 1) buf[p++] = *s++;
-				break;
-			}
-			case 'd': {
-				int v = va_arg(ap, int);
-				if (v < 0) { if (p < cap - 1) buf[p++] = '-'; v = -v; }
-				char num[16]; int n = 0;
-				if (v == 0) num[n++] = '0';
-				else while (v && n < 16) { num[n++] = '0' + (v % 10); v /= 10; }
-				while (n < width && n < 16) num[n++] = pad_zero ? '0' : ' ';
-				while (n-- > 0 && p < cap - 1) buf[p++] = num[n];
-				break;
-			}
-			case 'X': case 'x': {
-				unsigned int v = va_arg(ap, unsigned int);
-				const char *hex = "0123456789ABCDEF";
-				char num[16]; int n = 0;
-				if (v == 0) num[n++] = '0';
-				else while (v && n < 16) { num[n++] = hex[v & 0xF]; v >>= 4; }
-				while (n < width && n < 16) num[n++] = pad_zero ? '0' : ' ';
-				while (n-- > 0 && p < cap - 1) buf[p++] = num[n];
-				break;
-			}
-			case '%': if (p < cap - 1) buf[p++] = '%'; break;
-			default: if (p < cap - 1) buf[p++] = fmt[i]; break;
-		}
-	}
-	return p;
+	(void)msg;
 }
 
 static void xlog(const char *fmt, ...)
 {
-	char buf[256];
-	va_list ap;
-	va_start(ap, fmt);
-	int n = xfmt(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	if (n <= 0) return;
-	xwrite("ef0:/xmbih.log", buf, n);
-	xwrite("ms0:/xmbih.log", buf, n);
+	(void)fmt;
 }
 
 int (* AddVshItem)(void *a0, int topitem, SceVshItem *item);
@@ -651,12 +567,7 @@ int skip(SceVshItem *item, int location)
 
 static int xlog_hook(int loc, SceVshItem *item)
 {
-	int show = skip(item, loc);
-	if (xlog_item_count < XMBIH_LOG_MAX_ITEMS) {
-		xlog_item_count++;
-		xlog("hook loc=%d text='%s' show=%d\n", loc, item->text, show);
-	}
-	return show;
+	return skip(item, loc);
 }
 
 static int count_hidden_top_categories_before(int topitem)
@@ -914,14 +825,6 @@ int OnModuleStart(SceModule2 *mod)
 
 int module_start(SceSize args, void *argp)
 {
-	/* Fixed-string raw bootstrap log: writes BEFORE anything that could fault.
-	   Truncates so each boot starts fresh. */
-	{
-		SceUID fd = sceIoOpen("ef0:/xmbih.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
-		if (fd >= 0) sceIoClose(fd);
-		fd = sceIoOpen("ms0:/xmbih.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
-		if (fd >= 0) sceIoClose(fd);
-	}
 	xlog_raw_both("xmbih: module_start entry\n");
 	if (argp) {
 		xlog_raw_both("xmbih: argp=");
