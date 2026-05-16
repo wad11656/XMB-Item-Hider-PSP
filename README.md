@@ -4,6 +4,9 @@ XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to inc
 
 Continuation of Frostegater's project: https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP
 
+Tested on:
+- PSP Go 6.61 ARK-4
+
 #### <ins>Installation:</ins>
 `1.` Download & Extract the `.zip` from [the latest Release](https://github.com/wad11656/XMB-Item-Hider-PSP/releases/latest)<br>
 `2.` Move the included `.prx` and `.ini` to `<MemoryStick>:/SEPLUGINS` _(non-PSP Go)_ or `<InternalStorage>:/SEPLUGINS` _(PSP Go)_.<br>
