@@ -6,6 +6,7 @@ Continuation of Frostegater's project: https://www.gamebrew.org/wiki/XMB_Item_Hi
 
 Tested on:
 - 6.61 ARK-4
+- 6.61 ARK-5
 
 #### <ins>Installation:</ins>
 `1.` Download & Extract the `.zip` from [the latest Release](https://github.com/wad11656/XMB-Item-Hider-PSP/releases/latest)<br>

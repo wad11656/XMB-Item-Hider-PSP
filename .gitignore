@@ -6,4 +6,4 @@ flahes-pspGo/
 *.o
 *.elf
 *.prx
-online_binary
+!release/*.prx

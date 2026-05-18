@@ -25,3 +25,12 @@ LIBS = -Llib -lpspsystemctrl_user -lpspkubridge -lpspvshctrl -lpspsystemctrl_ker
 
 PSPSDK = $(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build_prx.mak
+
+# Drop a copy of the built PRX into release/ so it's the single canonical
+# location for the ready-to-flash binary (and the one .prx that's tracked
+# in git per .gitignore's `!release/*.prx` rule).
+all: install-release
+.PHONY: install-release
+install-release: $(TARGET).prx
+	@mkdir -p release
+	cp -f $(TARGET).prx release/$(TARGET).prx
