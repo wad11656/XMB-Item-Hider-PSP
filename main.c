@@ -164,6 +164,27 @@ static void xlog(const char *fmt, ...)
 int (* AddVshItem)(void *a0, int topitem, SceVshItem *item);
 int (* umdIoOpen)(PspIoDrvFileArg* arg, char* file, int flags, SceMode mode);
 
+/* File-scope replacement for the original GCC-nested-function definition
+   of umdIoOpenPatched inside PatchVshMain. The isofs driver retains this
+   pointer indefinitely; a nested function's address is a stack-resident
+   trampoline that gets clobbered when PatchVshMain returns, which on
+   modern psp-gcc + ARK-5 causes the PSP to crash the moment a UMD's
+   preview is loaded and isofs calls into us. As a top-level function it
+   captures nothing from PatchVshMain (it only references globals), so the
+   lift is behaviourally identical except it doesn't crash. */
+extern char *game_category;     /* defined further down */
+extern char *global_category;
+extern int   cfg(char *category, char *fmt);
+static int umdIoOpenPatched(PspIoDrvFileArg* arg, char* file, int flags, SceMode mode)
+{
+	return (strcmp(file, "/PSP_GAME/SYSDIR/UPDATE/PARAM.SFO") == 0 &&
+	        (cfg(game_category, "UMD_UPDATE") ||
+	         cfg(global_category, "HIDE_ALL") ||
+	         set[4]))
+	       ? -1
+	       : umdIoOpen(arg, file, flags, mode);
+}
+
 /* Once we've force-forwarded one xmbctrl trigger, xmbctrl's items_added
    static flips and the CFW menus are injected. Every subsequent trigger
    item can then go through skip() normally, so the user gets to hide them.
@@ -471,13 +492,7 @@ static int AdjustTopCategoryCountAndGetCount(void *ctx)
 
 static void PatchTopCategories(u32 text_addr)
 {
-	u32 *meta0;
-	u32 *meta1;
-	u32 *meta2;
 	XmbTopCategory *table;
-	u32 filtered_meta0[8];
-	u32 filtered_meta1[8];
-	u32 filtered_meta2[8];
 	XmbTopCategory filtered[8];
 	int i;
 	int out = 0;
@@ -492,9 +507,17 @@ static void PatchTopCategories(u32 text_addr)
 		xlog("topcat: table not found\n");
 		return;
 	}
-	meta0 = (u32 *)((char *)table - (8 * sizeof(u32) * 3));
-	meta1 = (u32 *)((char *)table - (8 * sizeof(u32) * 2));
-	meta2 = (u32 *)((char *)table - (8 * sizeof(u32) * 1));
+
+	/* Compact the XmbTopCategory entries (icons + text) only. We previously
+	   also mutated three u32[8] arrays sitting immediately before the
+	   table (wad11656's "meta0/meta1/meta2"), but their purpose is
+	   unknown -- and on ARK-5 the UMD-preview code path indexes into one
+	   of them by the original (pre-compaction) category index, so
+	   zero-padding the tail crashed the system when a UMD was inserted
+	   with any category hidden. Leaving them alone fixes the crash, and
+	   the visual category hide still works because the runtime count
+	   patch (AdjustTopCategoryCountAndGetCount) is what actually shrinks
+	   the column count vshmain renders. */
 
 	for (i = 0; i < 8; i++) {
 		int hide = hide_top_category(i);
@@ -505,9 +528,6 @@ static void PatchTopCategories(u32 text_addr)
 			continue;
 		}
 
-		filtered_meta0[out] = meta0[i];
-		filtered_meta1[out] = meta1[i];
-		filtered_meta2[out] = meta2[i];
 		memcpy(&filtered[out], &table[i], sizeof(filtered[out]));
 		out++;
 	}
@@ -518,19 +538,12 @@ static void PatchTopCategories(u32 text_addr)
 	}
 
 	while (out < 8) {
-		filtered_meta0[out] = 0;
-		filtered_meta1[out] = 0;
-		filtered_meta2[out] = 0;
 		memset(&filtered[out], 0, sizeof(filtered[out]));
 		out++;
 	}
 
-	memcpy(meta0, filtered_meta0, sizeof(filtered_meta0));
-	memcpy(meta1, filtered_meta1, sizeof(filtered_meta1));
-	memcpy(meta2, filtered_meta2, sizeof(filtered_meta2));
 	memcpy(table, filtered, sizeof(filtered));
-	xlog("topcat: meta0=0x%08X meta1=0x%08X meta2=0x%08X table=0x%08X compacted\n",
-		(u32)meta0, (u32)meta1, (u32)meta2, (u32)table);
+	xlog("topcat: table=0x%08X compacted\n", (u32)table);
 }
 
 int skip(SceVshItem *item, int location)
@@ -827,13 +840,8 @@ void PatchVshMain(u32 text_addr)
 		}
 	}
 
-	/* Prologue-patch the real AddVshItem. The trampoline holds the
-	   original first two instructions plus `j AddVshItem+8` so callers
-	   that reach the trampoline see normal behavior. The patched prologue
-	   redirects every entry into our filter, where skip() runs again --
-	   this is what gives us a chance to hide xmbctrl's first forwarded
-	   trigger item even though our wrappers had to force-forward it.
-	   Reset the per-boot trigger gate here too. */
+	/* Prologue-patch the real AddVshItem (Layer 2). Filters xmbctrl's
+	   forwarded trigger item so even the first trigger is hideable. */
 	xmbctrl_triggered = 0;
 	{
 		u32 real_addvsh = text_addr + patch[0];
@@ -896,14 +904,11 @@ void PatchVshMain(u32 text_addr)
 	}
 	else
 	{
-		/* Hide UMD Update Icon (from UVMR by TN) */
-		int umdIoOpenPatched(PspIoDrvFileArg* arg, char* file, int flags, SceMode mode)
-		{
-			return (strcmp(file, "/PSP_GAME/SYSDIR/UPDATE/PARAM.SFO") == 0 && 
-			(cfg(game_category, "UMD_UPDATE") || 
-			cfg(global_category, "HIDE_ALL") || set[4])) ? -1 : umdIoOpen(arg, file, flags, mode);;
-		}
-			
+		/* Hide UMD Update Icon (from UVMR by TN).
+		   umdIoOpenPatched is defined at file scope (see top of file); the
+		   original nested-function form crashed on modern psp-gcc because
+		   the function pointer was a stack-resident trampoline that the
+		   isofs driver kept calling after PatchVshMain's frame went away. */
 		PspIoDrv* umddrv = sctrlHENFindDriver("isofs");
 		umdIoOpen = umddrv->funcs->IoOpen;
 		umddrv->funcs->IoOpen = umdIoOpenPatched;
