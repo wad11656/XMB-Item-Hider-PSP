@@ -30,6 +30,7 @@
 
 #include <pspsdk.h>
 #include <pspkernel.h>
+#include <pspmodulemgr.h>
 #include <systemctrl.h>
 #include <main.h>
 #include <kubridge.h>
@@ -37,6 +38,7 @@
 #include <stdarg.h>
 #include "minGlue.h"
 #include "minIni.h"
+#include "include/macros.h"
 
 PSP_MODULE_INFO("XMBIH", 0x0007, 1, 3);
 
@@ -46,6 +48,26 @@ static struct {
 } cfg_store;
 
 #define set cfg_store.flags
+
+static char log_path[16];
+static int log_enabled;
+static int saw_umd_video_path;
+static int saw_umd_game_path;
+static int (*UmdMediaStateFunc)(void *ctx);
+static void (*TopcatStateSetupFunc)(void *ctx);
+static int (*TopcatSelectHelperFunc)(void *ctx, int topitem);
+static int (*TopcatSelectShiftedFunc)(void *ctx, int adjusted_topitem, int original_topitem);
+static int (*TopcatPositionFunc)(void *obj, int topitem);
+static u32 umd_media_state_patch;
+static u32 topcat_state_setup_patch;
+static u32 topcat_select_helper_patch;
+static u32 topcat_position_patch;
+static volatile u32 add_vsh_filter_ra;
+static u32 top_category_runtime_obj;
+static int umd_state_calls;
+static int topcat_setup_calls;
+static int topcat_select_calls;
+static int topcat_position_calls;
 
 /*
  * Hand-rolled libc replacements. Linking against newlib's libc.a on a
@@ -103,6 +125,18 @@ char *strchr(const char *s, int c)
 	return NULL;
 }
 
+int strncmp(const char *a, const char *b, unsigned int n)
+{
+	while (n && *a && *a == *b) {
+		a++;
+		b++;
+		n--;
+	}
+	if (!n)
+		return 0;
+	return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
 void *memset(void *dst, int v, unsigned int n)
 {
 	unsigned char *p = (unsigned char *)dst;
@@ -146,15 +180,659 @@ long strtol(const char *s, char **end, int base)
 	return neg ? -v : v;
 }
 
+static void append_log(const char *msg)
+{
+	SceUID fd;
+	unsigned int len;
+
+	if (!log_enabled || !msg)
+		return;
+
+	len = strlen(msg);
+	if (!len)
+		return;
+
+	fd = sceIoOpen(log_path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
+	if (fd < 0)
+		return;
+
+	sceIoWrite(fd, msg, len);
+	sceIoClose(fd);
+}
+
 static void xlog_raw_both(const char *msg)
 {
-	(void)msg;
+	append_log(msg);
 }
 
 static void xlog(const char *fmt, ...)
 {
 	(void)fmt;
 }
+
+static void append_int(char *buf, int *pos, int value)
+{
+	char tmp[16];
+	int i = 0;
+	unsigned int v;
+
+	if (value < 0) {
+		buf[(*pos)++] = '-';
+		v = (unsigned int)(-value);
+	}
+	else {
+		v = (unsigned int)value;
+	}
+
+	do {
+		tmp[i++] = '0' + (v % 10);
+		v /= 10;
+	} while (v && i < (int)sizeof(tmp));
+
+	while (i > 0)
+		buf[(*pos)++] = tmp[--i];
+}
+
+static void append_hex8(char *buf, int *pos, u32 value)
+{
+	static const char hexdigits[] = "0123456789ABCDEF";
+	int i;
+
+	for (i = 7; i >= 0; i--)
+		buf[(*pos)++] = hexdigits[(value >> (i * 4)) & 0xF];
+}
+
+static void append_text(char *buf, int *pos, const char *text)
+{
+	while (*text)
+		buf[(*pos)++] = *text++;
+}
+
+static void xlog_boot_state(int hidden_count)
+{
+	char buf[96];
+	int pos = 0;
+
+	append_text(buf, &pos, "boot: use=");
+	append_int(buf, &pos, set[55]);
+	append_text(buf, &pos, " hide_all=");
+	append_int(buf, &pos, set[54]);
+	append_text(buf, &pos, " top_hidden=");
+	append_int(buf, &pos, hidden_count);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_vsh_text(u32 text_addr)
+{
+	char buf[48];
+	int pos = 0;
+
+	append_text(buf, &pos, "vsh text=");
+	append_hex8(buf, &pos, text_addr);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_media_item(const char *kind, int topitem, int adjusted, const char *text)
+{
+	char buf[128];
+	int pos = 0;
+
+	append_text(buf, &pos, kind);
+	append_text(buf, &pos, " item top=");
+	append_int(buf, &pos, topitem);
+	append_text(buf, &pos, " adj=");
+	append_int(buf, &pos, adjusted);
+	append_text(buf, &pos, " text=");
+	append_text(buf, &pos, text);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_filter_caller(u32 ra, int topitem, const char *text)
+{
+	char buf[128];
+	int pos = 0;
+
+	append_text(buf, &pos, "filter caller ra=");
+	append_hex8(buf, &pos, ra);
+	append_text(buf, &pos, " top=");
+	append_int(buf, &pos, topitem);
+	append_text(buf, &pos, " text=");
+	append_text(buf, &pos, text);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_code_words(const char *label, u32 addr, int words)
+{
+	char buf[256];
+	int pos = 0;
+	int i;
+
+	append_text(buf, &pos, label);
+	append_text(buf, &pos, "=");
+	append_hex8(buf, &pos, addr);
+	append_text(buf, &pos, " [");
+	for (i = 0; i < words; i++) {
+		if (i)
+			append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, *(u32 *)(addr + i * 4));
+	}
+	append_text(buf, &pos, "]\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static u32 resolve_jump_target(u32 addr, u32 insn)
+{
+	return ((addr + 4) & 0xF0000000) | ((insn & 0x03FFFFFF) << 2);
+}
+
+static void xlog_cstring(const char *label, const char *text)
+{
+	char buf[192];
+	int pos = 0;
+	int i = 0;
+
+	append_text(buf, &pos, label);
+	append_text(buf, &pos, "=");
+	while (text && text[i] && i < 96) {
+		char c = text[i++];
+		if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7E)
+			break;
+		buf[pos++] = c;
+	}
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_module_for_addr(u32 addr)
+{
+	SceUID mods[64];
+	int count = 0;
+	int i;
+
+	if (sceKernelGetModuleIdList(mods, sizeof(mods), &count) < 0)
+		return;
+
+	for (i = 0; i < count && i < (int)(sizeof(mods) / sizeof(mods[0])); i++) {
+		SceKernelModuleInfo info;
+		char buf[192];
+		int pos = 0;
+
+		memset(&info, 0, sizeof(info));
+		info.size = sizeof(info);
+		if (sceKernelQueryModuleInfo(mods[i], &info) < 0)
+			continue;
+
+		if (addr < info.text_addr || addr >= info.text_addr + info.text_size)
+			continue;
+
+		append_text(buf, &pos, "caller module=");
+		append_text(buf, &pos, info.name);
+		append_text(buf, &pos, " text=");
+		append_hex8(buf, &pos, info.text_addr);
+		append_text(buf, &pos, " size=");
+		append_hex8(buf, &pos, info.text_size);
+		append_text(buf, &pos, " addr=");
+		append_hex8(buf, &pos, addr);
+		append_text(buf, &pos, "\n");
+		buf[pos] = 0;
+		append_log(buf);
+		return;
+	}
+}
+
+static void xlog_umd_path(const char *kind, const char *path)
+{
+	char buf[192];
+	int pos = 0;
+
+	append_text(buf, &pos, kind);
+	append_text(buf, &pos, " open=");
+	append_text(buf, &pos, path);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_resolved_helper(const char *label, u32 stub_addr)
+{
+	u32 target = resolve_jump_target(stub_addr, _lw(stub_addr));
+
+	xlog_code_words(label, stub_addr, 8);
+	xlog_module_for_addr(target);
+	xlog_code_words("helper real", target, 16);
+}
+
+static void xlog_media_hit(const char *kind, void *a0, int topitem, int adjusted, const char *text)
+{
+	char buf[160];
+	int pos = 0;
+
+	append_text(buf, &pos, kind);
+	append_text(buf, &pos, " hit a0=");
+	append_hex8(buf, &pos, (u32)a0);
+	append_text(buf, &pos, " top=");
+	append_int(buf, &pos, topitem);
+	append_text(buf, &pos, " adj=");
+	append_int(buf, &pos, adjusted);
+	append_text(buf, &pos, " text=");
+	append_text(buf, &pos, text);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_umd_state(int before, int after)
+{
+	char buf[96];
+	int pos = 0;
+
+	append_text(buf, &pos, "umd state cat=");
+	append_int(buf, &pos, before);
+	append_text(buf, &pos, " adj=");
+	append_int(buf, &pos, after);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_umd_state_call(void *ctx, int ret, int category)
+{
+	char buf[160];
+	int pos = 0;
+
+	append_text(buf, &pos, "umd state call=");
+	append_int(buf, &pos, ++umd_state_calls);
+	append_text(buf, &pos, " ctx=");
+	append_hex8(buf, &pos, (u32)ctx);
+	append_text(buf, &pos, " ret=");
+	append_int(buf, &pos, ret);
+	append_text(buf, &pos, " cat=");
+	append_int(buf, &pos, category);
+	append_text(buf, &pos, " video=");
+	append_int(buf, &pos, saw_umd_video_path);
+	append_text(buf, &pos, " game=");
+	append_int(buf, &pos, saw_umd_game_path);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_topcat_count(u32 obj, int count, int new_count, void *ctx)
+{
+	char buf[160];
+	int pos = 0;
+
+	append_text(buf, &pos, "topcat count obj=");
+	append_int(buf, &pos, (int)obj);
+	append_text(buf, &pos, " count=");
+	append_int(buf, &pos, count);
+	append_text(buf, &pos, " new=");
+	append_int(buf, &pos, new_count);
+	append_text(buf, &pos, " e70=");
+	append_int(buf, &pos, *(int *)((char *)ctx + 0xE70));
+	append_text(buf, &pos, " e74=");
+	append_int(buf, &pos, *(int *)((char *)ctx + 0xE74));
+	append_text(buf, &pos, " e78=");
+	append_int(buf, &pos, *(int *)((char *)ctx + 0xE78));
+	append_text(buf, &pos, " e7c=");
+	append_int(buf, &pos, *(int *)((char *)ctx + 0xE7C));
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_topcat_slot_detail(int idx, u32 obj);
+
+static void xlog_topcat_runtime_state(void)
+{
+	u32 obj = top_category_runtime_obj;
+	u32 arr330;
+	u32 ptr360;
+	u32 *slot_ptrs;
+	char buf[256];
+	int pos = 0;
+
+	if (!obj)
+		return;
+
+	arr330 = *(u32 *)(obj + 0x330);
+	ptr360 = *(u32 *)(obj + 0x360);
+	slot_ptrs = ptr360 ? (u32 *)ptr360 : NULL;
+
+	append_text(buf, &pos, "topcat runtime obj=");
+	append_hex8(buf, &pos, obj);
+	append_text(buf, &pos, " 334=");
+	append_hex8(buf, &pos, *(u32 *)(obj + 0x334));
+	append_text(buf, &pos, " 338=");
+	append_hex8(buf, &pos, *(u32 *)(obj + 0x338));
+	append_text(buf, &pos, " 33C=");
+	append_hex8(buf, &pos, *(u32 *)(obj + 0x33C));
+	append_text(buf, &pos, " arr330=");
+	append_hex8(buf, &pos, arr330);
+	append_text(buf, &pos, " ptr360=");
+	append_hex8(buf, &pos, ptr360);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+
+	if (slot_ptrs) {
+		pos = 0;
+		append_text(buf, &pos, "topcat ptr360=");
+		append_hex8(buf, &pos, ptr360);
+		append_text(buf, &pos, " [");
+		append_hex8(buf, &pos, slot_ptrs[0]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, slot_ptrs[1]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, slot_ptrs[2]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, slot_ptrs[3]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, slot_ptrs[4]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, slot_ptrs[5]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, slot_ptrs[6]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, slot_ptrs[7]);
+		append_text(buf, &pos, "]\n");
+		buf[pos] = 0;
+		append_log(buf);
+
+		xlog_topcat_slot_detail(3, slot_ptrs[3]);
+		xlog_topcat_slot_detail(4, slot_ptrs[4]);
+		xlog_topcat_slot_detail(5, slot_ptrs[5]);
+	}
+}
+
+static void xlog_topcat_slot_detail(int idx, u32 obj)
+{
+	char buf[160];
+	int pos = 0;
+
+	append_text(buf, &pos, "topcat slot");
+	append_int(buf, &pos, idx);
+	append_text(buf, &pos, " obj=");
+	append_hex8(buf, &pos, obj);
+	if (obj) {
+		append_text(buf, &pos, " 330=");
+		append_hex8(buf, &pos, *(u32 *)(obj + 0x330));
+		append_text(buf, &pos, " 334=");
+		append_hex8(buf, &pos, *(u32 *)(obj + 0x334));
+		append_text(buf, &pos, " 33C=");
+		append_hex8(buf, &pos, *(u32 *)(obj + 0x33C));
+	}
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_topcat_slot_words(int idx, u32 obj)
+{
+	char buf[256];
+	int pos = 0;
+	u32 *p = (u32 *)obj;
+
+	append_text(buf, &pos, "topcat slot");
+	append_int(buf, &pos, idx);
+	append_text(buf, &pos, " words=");
+	append_hex8(buf, &pos, obj);
+	append_text(buf, &pos, " [");
+	if (obj) {
+		append_hex8(buf, &pos, p[0]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[1]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[2]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[3]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[4]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[5]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[6]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[7]);
+	}
+	append_text(buf, &pos, "]\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_topcat_slot_tail_words(int idx, u32 obj)
+{
+	char buf[256];
+	int pos = 0;
+	u32 *p = obj ? (u32 *)(obj + 0x320) : NULL;
+
+	append_text(buf, &pos, "topcat slot");
+	append_int(buf, &pos, idx);
+	append_text(buf, &pos, " tail=");
+	append_hex8(buf, &pos, obj);
+	append_text(buf, &pos, " [");
+	if (p) {
+		append_hex8(buf, &pos, p[0]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[1]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[2]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[3]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[4]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[5]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[6]);
+		append_text(buf, &pos, ",");
+		append_hex8(buf, &pos, p[7]);
+	}
+	append_text(buf, &pos, "]\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_topcat_slots_for_umd(const char *label)
+{
+	u32 obj = top_category_runtime_obj;
+	u32 ptr360;
+	u32 *slot_ptrs;
+	char buf[96];
+	int pos = 0;
+
+	if (!obj)
+		return;
+
+	ptr360 = *(u32 *)(obj + 0x360);
+	if (!ptr360)
+		return;
+
+	slot_ptrs = (u32 *)ptr360;
+
+	append_text(buf, &pos, label);
+	append_text(buf, &pos, " ptr360=");
+	append_hex8(buf, &pos, ptr360);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+
+	xlog_topcat_slot_detail(3, slot_ptrs[3]);
+	xlog_topcat_slot_detail(4, slot_ptrs[4]);
+	xlog_topcat_slot_detail(5, slot_ptrs[5]);
+	xlog_topcat_slot_words(3, slot_ptrs[3]);
+	xlog_topcat_slot_words(4, slot_ptrs[4]);
+	xlog_topcat_slot_words(5, slot_ptrs[5]);
+	xlog_topcat_slot_tail_words(3, slot_ptrs[3]);
+	xlog_topcat_slot_tail_words(4, slot_ptrs[4]);
+	xlog_topcat_slot_tail_words(5, slot_ptrs[5]);
+}
+
+static void xlog_topcat_ctx380(void *ctx)
+{
+	u32 *states = (u32 *)((char *)ctx + 0x17C);
+	char buf[256];
+	int pos = 0;
+
+	append_text(buf, &pos, "topcat ctx380=");
+	append_hex8(buf, &pos, (u32)states);
+	append_text(buf, &pos, " [");
+	append_hex8(buf, &pos, states[0]);
+	append_text(buf, &pos, ",");
+	append_hex8(buf, &pos, states[1]);
+	append_text(buf, &pos, ",");
+	append_hex8(buf, &pos, states[2]);
+	append_text(buf, &pos, ",");
+	append_hex8(buf, &pos, states[3]);
+	append_text(buf, &pos, ",");
+	append_hex8(buf, &pos, states[4]);
+	append_text(buf, &pos, ",");
+	append_hex8(buf, &pos, states[5]);
+	append_text(buf, &pos, ",");
+	append_hex8(buf, &pos, states[6]);
+	append_text(buf, &pos, ",");
+	append_hex8(buf, &pos, states[7]);
+	append_text(buf, &pos, "]\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_topcat_setup(void *ctx)
+{
+	char buf[128];
+	int pos = 0;
+
+	append_text(buf, &pos, "topcat setup call=");
+	append_int(buf, &pos, ++topcat_setup_calls);
+	append_text(buf, &pos, " ctx=");
+	append_hex8(buf, &pos, (u32)ctx);
+	append_text(buf, &pos, " video=");
+	append_int(buf, &pos, saw_umd_video_path);
+	append_text(buf, &pos, " game=");
+	append_int(buf, &pos, saw_umd_game_path);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+	xlog_topcat_ctx380(ctx);
+}
+
+static void xlog_topcat_select(void *ctx, int topitem, int ret)
+{
+	char buf[192];
+	int pos = 0;
+	u32 obj = *(u32 *)((char *)ctx + 0xA6C);
+	u32 obj338 = obj ? *(u32 *)(obj + 0x338) : 0;
+	u32 state = (topitem >= 0 && topitem < 8) ? *(u32 *)((char *)ctx + 0x17C + topitem * 4) : 0;
+
+	append_text(buf, &pos, "topcat select call=");
+	append_int(buf, &pos, ++topcat_select_calls);
+	append_text(buf, &pos, " ctx=");
+	append_hex8(buf, &pos, (u32)ctx);
+	append_text(buf, &pos, " top=");
+	append_int(buf, &pos, topitem);
+	append_text(buf, &pos, " ret=");
+	append_int(buf, &pos, ret);
+	append_text(buf, &pos, " state=");
+	append_hex8(buf, &pos, state);
+	append_text(buf, &pos, " obj338=");
+	append_hex8(buf, &pos, obj338);
+	append_text(buf, &pos, " video=");
+	append_int(buf, &pos, saw_umd_video_path);
+	append_text(buf, &pos, " game=");
+	append_int(buf, &pos, saw_umd_game_path);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_topcat_position(void *obj, int topitem, int ret)
+{
+	char buf[256];
+	int pos = 0;
+	u32 ptr360 = obj ? *(u32 *)((char *)obj + 0x360) : 0;
+	u32 child = 0;
+	u32 child330 = 0;
+	u32 child338 = 0;
+	u32 child33c = 0;
+
+	if (ptr360 && topitem >= 0 && topitem < 8) {
+		child = ((u32 *)ptr360)[topitem];
+		if (child) {
+			child330 = *(u32 *)(child + 0x330);
+			child338 = *(u32 *)(child + 0x338);
+			child33c = *(u32 *)(child + 0x33C);
+		}
+	}
+
+	append_text(buf, &pos, "topcat pos call=");
+	append_int(buf, &pos, ++topcat_position_calls);
+	append_text(buf, &pos, " obj=");
+	append_hex8(buf, &pos, (u32)obj);
+	append_text(buf, &pos, " top=");
+	append_int(buf, &pos, topitem);
+	append_text(buf, &pos, " ret=");
+	append_int(buf, &pos, ret);
+	append_text(buf, &pos, " child=");
+	append_hex8(buf, &pos, child);
+	append_text(buf, &pos, " 330=");
+	append_hex8(buf, &pos, child330);
+	append_text(buf, &pos, " 338=");
+	append_hex8(buf, &pos, child338);
+	append_text(buf, &pos, " 33C=");
+	append_hex8(buf, &pos, child33c);
+	append_text(buf, &pos, " video=");
+	append_int(buf, &pos, saw_umd_video_path);
+	append_text(buf, &pos, " game=");
+	append_int(buf, &pos, saw_umd_game_path);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_addvsh_return(const char *kind, int topitem, int ret)
+{
+	char buf[128];
+	int pos = 0;
+
+	append_text(buf, &pos, kind);
+	append_text(buf, &pos, " top=");
+	append_int(buf, &pos, topitem);
+	append_text(buf, &pos, " ret=");
+	append_int(buf, &pos, ret);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
+static void xlog_wrapped_addvsh_return(const char *kind, int original_topitem, int adjusted, int ret, const char *text)
+{
+	char buf[192];
+	int pos = 0;
+
+	append_text(buf, &pos, kind);
+	append_text(buf, &pos, " orig=");
+	append_int(buf, &pos, original_topitem);
+	append_text(buf, &pos, " adj=");
+	append_int(buf, &pos, adjusted);
+	append_text(buf, &pos, " ret=");
+	append_int(buf, &pos, ret);
+	append_text(buf, &pos, " text=");
+	append_text(buf, &pos, text);
+	append_text(buf, &pos, "\n");
+	buf[pos] = 0;
+	append_log(buf);
+}
+
 
 /* AddVshItem here is *not* the literal real AddVshItem; it's whatever the
    JAL at patch[1] points to right before we overwrite it. On stock firmware
@@ -177,6 +855,16 @@ extern char *global_category;
 extern int   cfg(char *category, char *fmt);
 static int umdIoOpenPatched(PspIoDrvFileArg* arg, char* file, int flags, SceMode mode)
 {
+	if (!strncmp(file, "/UMD_VIDEO/", 11)) {
+		saw_umd_video_path = 1;
+		xlog_umd_path("umd video", file);
+	}
+	else if (!strncmp(file, "/PSP_GAME/", 10) &&
+	         strcmp(file, "/PSP_GAME/SYSDIR/UPDATE/PARAM.SFO") != 0) {
+		saw_umd_game_path = 1;
+		xlog_umd_path("umd game", file);
+	}
+
 	return (strcmp(file, "/PSP_GAME/SYSDIR/UPDATE/PARAM.SFO") == 0 &&
 	        (cfg(game_category, "UMD_UPDATE") ||
 	         cfg(global_category, "HIDE_ALL") ||
@@ -191,6 +879,8 @@ static int umdIoOpenPatched(PspIoDrvFileArg* arg, char* file, int flags, SceMode
    Without this gate we'd force-forward every trigger forever and lose
    the ability to hide them. */
 static int xmbctrl_triggered = 0;
+static int add_vsh_wrapped_call = 0;
+static int logged_umd_filter_caller;
 
 /* Prologue-patch trampoline buffer. We attempt to patch the real
    AddVshItem's first two instructions to `j AddVshItemFilter; nop`. If it
@@ -200,11 +890,42 @@ static int xmbctrl_triggered = 0;
    this on v1.3fix2-derived code), the only consequence is that one
    trigger item still shows; the rest of the code still works. */
 static u32 add_vsh_trampoline[4] __attribute__((section(".data"), aligned(4))) = { 0, 0, 0, 0 };
+void AddVshItemFilterEntry(void);
 
 int skip(SceVshItem *item, int location);  /* forward decl, defined further down */
+static int adjust_topitem_for_hidden_categories(int topitem);
+
+__asm__(
+	".set noreorder\n"
+	".globl AddVshItemFilterEntry\n"
+	"AddVshItemFilterEntry:\n"
+	"lui $t9, %hi(add_vsh_filter_ra)\n"
+	"sw $ra, %lo(add_vsh_filter_ra)($t9)\n"
+	"j AddVshItemFilter\n"
+	"nop\n"
+	".set reorder\n"
+);
 
 int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 {
+	u32 caller_ra = add_vsh_filter_ra;
+
+	if (!add_vsh_wrapped_call) {
+		xlog_media_item("filter", topitem, topitem, item->text);
+		if (!strcmp(item->text, "msgshare_umd")) {
+			xlog_filter_caller(caller_ra, topitem, item->text);
+			xlog_topcat_runtime_state();
+			if (!logged_umd_filter_caller) {
+				logged_umd_filter_caller = 1;
+				xlog_module_for_addr(caller_ra);
+				xlog_code_words("filter caller code", caller_ra - 0x20, 24);
+				xlog_cstring("filter caller str1", (const char *)0x0881E438);
+				xlog_cstring("filter caller str2", (const char *)0x0881E440);
+				xlog_code_words("addvsh wrapper code", (u32)AddVshItem, 12);
+			}
+		}
+	}
+
 	/* Items reaching us here either came from xmbctrl forwarding (the
 	   trigger item, or its CFW item insertions) or any other caller of
 	   the real AddVshItem. Apply the user's hide rules and forward via
@@ -214,7 +935,16 @@ int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 	if(skip(item, 0)) {
 		int (*trampoline)(void *, int, SceVshItem *) =
 			(int(*)(void *, int, SceVshItem *))add_vsh_trampoline;
-		return trampoline(a0, topitem, item);
+		int tracing_umd = (!add_vsh_wrapped_call && !strcmp(item->text, "msgshare_umd"));
+		if (tracing_umd)
+			xlog_topcat_slots_for_umd("umd slots pre");
+		int ret = trampoline(a0, topitem, item);
+		if (tracing_umd)
+			xlog_topcat_slots_for_umd("umd slots post");
+
+		if (tracing_umd)
+			xlog_addvsh_return("filter addvsh", topitem, ret);
+		return ret;
 	}
 	return 0;
 }
@@ -253,7 +983,6 @@ static const char *top_category_names[8] = {
 
 static int top_category_hidden_count;
 static int top_category_count_logged;
-static u32 top_category_runtime_obj;
 static int top_category_runtime_return_override_logged;
 
 void ClearCaches()
@@ -451,6 +1180,7 @@ static int AdjustTopCategoryCountAndGetCount(void *ctx)
 		top_category_runtime_obj = obj;
 		xlog("topcat: runtime slots left unchanged obj=0x%08X slots=0x%08X\n",
 			obj, (u32)slots);
+		xlog_topcat_ctx380(ctx);
 		xlog("topcat: ctx e70=%08X,%08X,%08X,%08X,%08X,%08X\n",
 			*(u32 *)((char *)ctx + 0xE70),
 			*(u32 *)((char *)ctx + 0xE74),
@@ -469,6 +1199,8 @@ static int AdjustTopCategoryCountAndGetCount(void *ctx)
 	if (new_count < 1)
 		new_count = 1;
 
+	xlog_topcat_count(obj, count, new_count, ctx);
+
 	if (count > new_count) {
 		if (hide_top_category(0)) {
 			if (!top_category_runtime_return_override_logged) {
@@ -479,10 +1211,9 @@ static int AdjustTopCategoryCountAndGetCount(void *ctx)
 			return count;
 		}
 
-		*(int *)(obj + 0x334) = new_count;
 		if (!top_category_count_logged) {
 			top_category_count_logged = 1;
-			xlog("topcat: runtime count patched %d -> %d\n", count, new_count);
+			xlog("topcat: runtime count returned %d -> %d\n", count, new_count);
 		}
 		return new_count;
 	}
@@ -743,10 +1474,124 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 	   filters this first trigger's forward so even it gets hidden. */
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(0, item))
+	if(force_trigger || xlog_hook(0, item)) {
+		add_vsh_wrapped_call = 1;
 		AddVshItem(a0, topitem, item);
+		add_vsh_wrapped_call = 0;
+	}
 
 	return 0;
+}
+
+static int UmdMediaStatePatched(void *ctx)
+{
+	int ret = UmdMediaStateFunc(ctx);
+	int category = *(int *)((char *)ctx + 5160);
+
+	xlog_umd_state_call(ctx, ret, category);
+
+	return ret;
+}
+
+static void TopcatStateSetupPatched(void *ctx)
+{
+	TopcatStateSetupFunc(ctx);
+	xlog_topcat_setup(ctx);
+}
+
+static int TopcatSelectHelperPatched(void *ctx, int topitem)
+{
+	int ret = TopcatSelectHelperFunc(ctx, topitem);
+
+	if (saw_umd_video_path || saw_umd_game_path)
+		xlog_topcat_select(ctx, topitem, ret);
+
+	return ret;
+}
+
+static int TopcatPositionPatched(void *obj, int topitem)
+{
+	int ret = TopcatPositionFunc(obj, topitem);
+	u32 ptr360 = obj ? *(u32 *)((char *)obj + 0x360) : 0;
+	u32 child = 0;
+
+	if (ptr360 && topitem >= 0 && topitem < 8) {
+		child = ((u32 *)ptr360)[topitem];
+	}
+
+	if ((saw_umd_video_path || saw_umd_game_path) &&
+	    (topitem == 4 || topitem == 5))
+		xlog_topcat_position(obj, topitem, ret);
+
+	return ret;
+}
+
+static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
+{
+	int adjusted = adjust_topitem_for_hidden_categories(topitem);
+	int ret;
+
+	add_vsh_wrapped_call = 1;
+	ret = AddVshItem(a0, adjusted, item);
+	add_vsh_wrapped_call = 0;
+	xlog_wrapped_addvsh_return("umd video add", topitem, adjusted, ret, item->text);
+	return ret;
+}
+
+static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
+{
+	int adjusted = adjust_topitem_for_hidden_categories(topitem);
+	int ret;
+
+	add_vsh_wrapped_call = 1;
+	ret = AddVshItem(a0, adjusted, item);
+	add_vsh_wrapped_call = 0;
+	xlog_wrapped_addvsh_return("umd game add", topitem, adjusted, ret, item->text);
+	return ret;
+}
+
+static int UmdVideoSelectShiftPatched(void *ctx, int topitem)
+{
+	int adjusted = adjust_topitem_for_hidden_categories(topitem);
+	int ret = TopcatSelectShiftedFunc(ctx, adjusted, topitem);
+
+	if (saw_umd_video_path) {
+		char buf[128];
+		int pos = 0;
+		append_text(buf, &pos, "umd video select orig=");
+		append_int(buf, &pos, topitem);
+		append_text(buf, &pos, " adj=");
+		append_int(buf, &pos, adjusted);
+		append_text(buf, &pos, " ret=");
+		append_int(buf, &pos, ret);
+		append_text(buf, &pos, "\n");
+		buf[pos] = 0;
+		append_log(buf);
+	}
+
+	return ret;
+}
+
+static int UmdGameSelectShiftPatched(void *ctx, int topitem)
+{
+	int adjusted = adjust_topitem_for_hidden_categories(topitem);
+	int ret = TopcatSelectShiftedFunc(ctx, adjusted, topitem);
+
+	if (saw_umd_video_path || saw_umd_game_path) {
+		char buf[128];
+		int pos = 0;
+		append_text(buf, &pos, "umd game select orig=");
+		append_int(buf, &pos, topitem);
+		append_text(buf, &pos, " adj=");
+		append_int(buf, &pos, adjusted);
+		append_text(buf, &pos, " ret=");
+		append_int(buf, &pos, ret);
+		append_text(buf, &pos, "\n");
+		buf[pos] = 0;
+		append_log(buf);
+	}
+
+	return ret;
 }
 
 int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
@@ -754,8 +1599,11 @@ int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(1, item))
+	if(force_trigger || xlog_hook(1, item)) {
+		add_vsh_wrapped_call = 1;
 		AddVshItem(a0, topitem, item);
+		add_vsh_wrapped_call = 0;
+	}
 
 	return 0;
 }
@@ -765,30 +1613,55 @@ int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(2, item))
+	if(force_trigger || xlog_hook(2, item)) {
+		add_vsh_wrapped_call = 1;
 		AddVshItem(a0, topitem, item);
+		add_vsh_wrapped_call = 0;
+	}
 
 	return 0;
 }
 
 int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 {
+	int original_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
+	if (original_topitem != topitem)
+		xlog_media_item("video", original_topitem, topitem, item->text);
+	if (saw_umd_video_path)
+		xlog_media_hit("video", a0, original_topitem, topitem, item->text);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(3, item))
-		AddVshItem(a0, topitem, item);
+	if(force_trigger || xlog_hook(3, item)) {
+		add_vsh_wrapped_call = 1;
+		{
+			int ret = AddVshItem(a0, topitem, item);
+			xlog_wrapped_addvsh_return("video addvsh", original_topitem, topitem, ret, item->text);
+		}
+		add_vsh_wrapped_call = 0;
+	}
 
 	return 0;
 }
 
 int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 {
+	int original_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
+	if (original_topitem != topitem)
+		xlog_media_item("game", original_topitem, topitem, item->text);
+	if (saw_umd_video_path || saw_umd_game_path)
+		xlog_media_hit("game", a0, original_topitem, topitem, item->text);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(4, item))
-		AddVshItem(a0, topitem, item);
+	if(force_trigger || xlog_hook(4, item)) {
+		add_vsh_wrapped_call = 1;
+		{
+			int ret = AddVshItem(a0, topitem, item);
+			xlog_wrapped_addvsh_return("game addvsh", original_topitem, topitem, ret, item->text);
+		}
+		add_vsh_wrapped_call = 0;
+	}
 
 	return 0;
 }
@@ -798,8 +1671,11 @@ int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(5, item))
+	if(force_trigger || xlog_hook(5, item)) {
+		add_vsh_wrapped_call = 1;
 		AddVshItem(a0, topitem, item);
+		add_vsh_wrapped_call = 0;
+	}
 
 	return 0;
 }
@@ -809,14 +1685,19 @@ int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(6, item))
+	if(force_trigger || xlog_hook(6, item)) {
+		add_vsh_wrapped_call = 1;
 		AddVshItem(a0, topitem, item);
+		add_vsh_wrapped_call = 0;
+	}
 
 	return 0;
 }
 
 void PatchVshMain(u32 text_addr)
 {
+	TopcatSelectShiftedFunc = (int (*)(void *, int, int))(text_addr + 0x22998);
+
 	/* Capture whatever the patch[1] JAL currently points at -- the real
 	   AddVshItem on stock firmware, or xmbctrl's wrapper on ARK-5/ARK-4
 	   (because OnModuleStart has already chained to `previous` before us,
@@ -829,6 +1710,7 @@ void PatchVshMain(u32 text_addr)
 	}
 
 	xlog("PatchVshMain: text=0x%08X AddVshItem=0x%08X\n", text_addr, (u32)AddVshItem);
+	xlog_code_words("addvsh target", (u32)AddVshItem, 12);
 	xlog("  patch[0]=0x%X first4@AddVshItem=0x%08X\n", patch[0], *(u32 *)AddVshItem);
 	{
 		int i;
@@ -850,7 +1732,7 @@ void PatchVshMain(u32 text_addr)
 		add_vsh_trampoline[2] = 0x08000000 | (((real_addvsh + 8) >> 2) & 0x03FFFFFF);
 		add_vsh_trampoline[3] = 0;
 
-		_sw(0x08000000 | (((u32)AddVshItemFilter >> 2) & 0x03FFFFFF), real_addvsh);
+		_sw(0x08000000 | (((u32)AddVshItemFilterEntry >> 2) & 0x03FFFFFF), real_addvsh);
 		_sw(0, real_addvsh + 4);
 	}
 
@@ -866,6 +1748,50 @@ void PatchVshMain(u32 text_addr)
 			*(u32 *)(text_addr + topcat_count_patch),
 			*(u32 *)(text_addr + topcat_count_patch + 4));
 	}
+
+	if (umd_media_state_patch) {
+		HIJACK_FUNCTION(text_addr + umd_media_state_patch, UmdMediaStatePatched, UmdMediaStateFunc);
+		xlog("  umd state patch=0x%X site=0x%08X\n",
+			umd_media_state_patch, text_addr + umd_media_state_patch);
+	}
+
+	if (topcat_state_setup_patch) {
+		HIJACK_FUNCTION(text_addr + topcat_state_setup_patch, TopcatStateSetupPatched, TopcatStateSetupFunc);
+		xlog("  topcat setup patch=0x%X site=0x%08X\n",
+			topcat_state_setup_patch, text_addr + topcat_state_setup_patch);
+	}
+
+	if (topcat_select_helper_patch) {
+		HIJACK_FUNCTION(text_addr + topcat_select_helper_patch, TopcatSelectHelperPatched, TopcatSelectHelperFunc);
+		xlog("  topcat select patch=0x%X site=0x%08X\n",
+			topcat_select_helper_patch, text_addr + topcat_select_helper_patch);
+		xlog_code_words("topcat select target", text_addr + topcat_select_helper_patch, 16);
+		xlog_code_words("topcat select tramp", (u32)TopcatSelectHelperFunc, 8);
+	}
+
+	xlog_code_words("topcat select shifted", (u32)TopcatSelectShiftedFunc, 16);
+
+	if (topcat_position_patch) {
+		u32 tramp_target;
+
+		HIJACK_FUNCTION(text_addr + topcat_position_patch, TopcatPositionPatched, TopcatPositionFunc);
+		xlog("  topcat pos patch=0x%X site=0x%08X\n",
+			topcat_position_patch, text_addr + topcat_position_patch);
+		xlog_code_words("topcat pos target", text_addr + topcat_position_patch, 16);
+		xlog_code_words("topcat pos tramp", (u32)TopcatPositionFunc, 8);
+		tramp_target = resolve_jump_target((u32)TopcatPositionFunc, _lw((u32)TopcatPositionFunc));
+		xlog_module_for_addr(tramp_target);
+		xlog_code_words("topcat pos real", tramp_target, 16);
+	}
+
+	xlog_resolved_helper("topcat down stub", text_addr + 0x3F230);
+	xlog_resolved_helper("topcat settle stub", text_addr + 0x3F378);
+	xlog_resolved_helper("topcat up stub", text_addr + 0x3F798);
+
+	MAKE_CALL(text_addr + 0x22CDC, UmdVideoAddPatchedRet);
+	MAKE_CALL(text_addr + 0x22CEC, UmdVideoSelectShiftPatched);
+	MAKE_CALL(text_addr + 0x22D5C, UmdGameAddPatchedRet);
+	MAKE_CALL(text_addr + 0x22DA4, UmdGameSelectShiftPatched);
 
 	/* Photo Memory Stick */
 	MAKE_CALL(text_addr + patch[2], AddVshItemPatchedPhoto);
@@ -934,6 +1860,7 @@ int OnModuleStart(SceModule2 *mod)
 	u32 text_addr = mod->text_addr;
 
 	if(strcmp(modname, "vsh_module") == 0) {
+		xlog_vsh_text(text_addr);
 		xlog("OnModuleStart: vsh_module text=0x%08X patching s6=%d s51=%d s52=%d s53=%d s38=%d\n",
 			text_addr, set[6], set[51], set[52], set[53], set[38]);
 		PatchVshMain(text_addr);
@@ -944,6 +1871,26 @@ int OnModuleStart(SceModule2 *mod)
 
 int module_start(SceSize args, void *argp)
 {
+	log_enabled = 0;
+	log_path[0] = 0;
+
+	if (argp) {
+		if (!strncmp((const char *)argp, "ms0:/", 5)) {
+			strcpy(log_path, "ms0:/xmbih.log");
+			log_enabled = 1;
+		}
+		else if (!strncmp((const char *)argp, "ef0:/", 5)) {
+			strcpy(log_path, "ef0:/xmbih.log");
+			log_enabled = 1;
+		}
+	}
+
+	if (log_enabled) {
+		SceUID fd = sceIoOpen(log_path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+		if (fd >= 0)
+			sceIoClose(fd);
+	}
+
 	xlog_raw_both("xmbih: module_start entry\n");
 	if (argp) {
 		xlog_raw_both("xmbih: argp=");
@@ -1130,6 +2077,10 @@ int module_start(SceSize args, void *argp)
 			patch[0] = 0x22648;
 			patch[1] = 0x20EFC;
 			topcat_count_patch = 0x20890;
+			topcat_state_setup_patch = 0x22AF4;
+			topcat_select_helper_patch = 0x22928;
+			topcat_position_patch = 0x3F4E0;
+			umd_media_state_patch = 0x2AEAC;
 			/* Frostegater */
 			patch[2] = 0x23A44;
 			patch[3] = 0x23B24;
@@ -1153,24 +2104,14 @@ int module_start(SceSize args, void *argp)
 	top_category_runtime_obj = 0;
 
 	xlog_raw_both("ck6: post-ini-parse\n");
-	xlog("settings: USE_PLUGIN=%d HIDE_ALL=%d PSN=%d\n", set[55], set[54], set[6]);
-	if (set[0] == 2)
-		xlog("topcat: HIDE_ALL_SETTINGS=2 not supported; ignoring top-category hide\n");
-	if (set[54] == 2)
-		xlog("topcat: HIDE_ALL=2 blank-row mode enabled\n");
-	xlog("topcat: hidden count=%d\n", top_category_hidden_count);
-	xlog("MS: &set=0x%08X &set[55]=0x%08X *(&set[55])=%d\n",
-		(unsigned int)&set[0], (unsigned int)&set[55], set[55]);
+	xlog_boot_state(top_category_hidden_count);
 	if (!set[55]) {
-		xlog("USE_PLUGIN=0 at module_start, not installing handler\n");
 		return 0;
 	}
 
 	xlog_raw_both("ck7: pre-sctrlHENSetStartModuleHandler\n");
 	previous = sctrlHENSetStartModuleHandler(OnModuleStart);
 	xlog_raw_both("ck8: post-sctrlHENSetStartModuleHandler\n");
-
-	xlog("module_start done; handler installed\n");
 
 	return 0;
 }
