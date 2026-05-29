@@ -21,6 +21,13 @@ Tested on:
 
 5\. Boot your PSP/Reset the VSH (XMB).
 
+#### <ins>Start on Memory Stick:</ins>
+Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `.ini` to make the XMB boot with the cursor on **Memory Stick** in the `Game` category instead of `Saved Data Utility` / `Game Sharing`.
+
+It briefly hides those items (and the UMD disc, if inserted) during boot so the cursor settles on Memory Stick, then re-adds them automatically once the XMB has finished loading — so everything stays accessible. The re-add is tied to a detected "XMB ready" signal (no fixed delay).
+
+While `START_AT_MEMORY_STICK` is enabled it also **force-hides the "UMD Update" item** (the same effect as `UMD_UPDATE = 1`). This is required: booting / resetting the VSH with that item present and a UMD inserted crashes the XMB.
+
 #### <ins>Known Limitations:</ins>
 - You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in the `.ini` file--only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
   - `Settings` *does* get hidden with `HIDE_ALL = 2`.

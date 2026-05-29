@@ -177,9 +177,14 @@ extern char *global_category;
 extern int   cfg(char *category, char *fmt);
 static int umdIoOpenPatched(PspIoDrvFileArg* arg, char* file, int flags, SceMode mode)
 {
+	/* START_AT_MEMORY_STICK force-hides the UMD Update item: with it enabled,
+	   booting (or resetting the VSH) with a UMD inserted while that item is
+	   present crashes the XMB, so we block its PARAM.SFO unconditionally here
+	   the same way UMD_UPDATE=1 does. */
 	return (strcmp(file, "/PSP_GAME/SYSDIR/UPDATE/PARAM.SFO") == 0 &&
 	        (cfg(game_category, "UMD_UPDATE") ||
 	         cfg(global_category, "HIDE_ALL") ||
+	         cfg(global_category, "START_AT_MEMORY_STICK") ||
 	         set[4]))
 	       ? -1
 	       : umdIoOpen(arg, file, flags, mode);
@@ -206,6 +211,13 @@ static int is_ark_custom_item(const char *text);
 static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
 	int *out_topitem, const char *source);
 
+/* Used by AddVshItemFilter below (START_AT_MEMORY_STICK), but the rest of the
+   feature's state is defined further down. */
+static int adjust_topitem_for_hidden_categories(int topitem);  /* defined below */
+static volatile int boot_hide_for_ms = 0;
+static SceVshItem captured_ark[5];
+static volatile int captured_ark_count = 0;
+
 int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 {
 	int adjusted_topitem = topitem;
@@ -224,6 +236,25 @@ int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 	if (is_ark_custom_item(item->text)) {
 		if (!prepare_topitem_for_item(item, topitem, &adjusted_topitem, "filter"))
 			return 0;
+
+		/* START_AT_MEMORY_STICK: a CFW item only lands in GAME (ahead of Memory
+		   Stick, stealing the boot cursor) when Extras is hidden -- in which case
+		   its adjusted_topitem equals Game's displayed index. In that case hide +
+		   capture it; the worker thread re-adds it at the TOP of Game (before
+		   Game Sharing) after the cursor settles on MS. When the item is bound
+		   for Extras (Extras visible), adjusted_topitem != Game, so we leave it
+		   alone -- it lives in Extras and never touches the Game cursor. */
+		if (boot_hide_for_ms &&
+		    adjusted_topitem == adjust_topitem_for_hidden_categories(5)) {
+			int k, dup = 0;
+			for (k = 0; k < captured_ark_count; k++)
+				if (!strcmp(captured_ark[k].text, item->text)) { dup = 1; break; }
+			if (!dup && captured_ark_count < 5) {
+				memcpy(&captured_ark[captured_ark_count], item, sizeof(SceVshItem));
+				captured_ark_count++;
+			}
+			return 0;
+		}
 	}
 
 	if(skip(item, 0)) {
@@ -234,6 +265,105 @@ int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 	return 0;
 }
 u32 topcat_count_patch;
+
+/* START_AT_MEMORY_STICK=1 in xmbih.ini: hide the fixed Game items that precede
+   Memory Stick (Game Sharing, Saved Data Utility, and the UMD disc when
+   present) during the boot pass so the XMB cursor lands on Memory Stick.
+   A worker thread keeps copies of the hidden items and the add-context
+   (container + Game topitem) that vshmain used; once the XMB has finished
+   loading and placed the cursor, it re-adds the copies by calling AddVshItem
+   directly -- incrementally, the way a real disc/card insert adds an item --
+   so the Game row isn't re-scanned/rebuilt and there's no blink.
+
+   "XMB finished loading" is detected by watching the scene object's current
+   top-category field (obj+0x338): it reaches the Game column's index
+   (start_ms_game_index, computed below) once the XMB settles, just after the
+   cursor is placed. We poll for that instead of guessing a delay, so the
+   re-add lands at the right moment regardless of boot speed. */
+static int start_at_ms_flag = 0;
+/* The Game column's displayed top-category index, i.e. the value obj+0x338
+   reaches when Game is focused (= our "XMB ready" signal). Game's native
+   index is 5, but hiding any category BEFORE Game (Photo/Music/Video/etc.)
+   shifts it left, so this is computed at module_start as 5 minus the hidden
+   pre-Game categories -- the same shift categories_lite applies. */
+static int start_ms_game_index = 5;
+static volatile int ms_thread_started = 0;
+/* Scene context, captured in the count hook so the worker thread can reach
+   the scene object (`*(ctx+0xA6C)`) and poll its "XMB ready" field. */
+static volatile u32 scene_ctx = 0;
+/* Heap-free copies of the fixed Game items we hide at boot -- Game Sharing,
+   Saved Data Utility, and the UMD disc when present (shallow memcpy; their
+   context/subtitle pointers reference vshmain's persistent data, same as
+   ARK-5's item injection). Re-added directly by the worker thread, via
+   AddVshItem, once the XMB is ready. */
+static SceVshItem captured_gamedl;
+static SceVshItem captured_savedata;
+static SceVshItem captured_umd;            /* inserted UMD disc (msgshare_umd) */
+static volatile int gamedl_captured = 0;
+static volatile int savedata_captured = 0;
+static volatile int umd_captured = 0;
+/* captured_ark[] / captured_ark_count moved up (used by AddVshItemFilter). The
+   ARK CFW items, when Extras is hidden (e.g. fake VSH region), get relocated
+   into Game ahead of Memory Stick and would otherwise steal the boot cursor, so
+   START_AT hides + captures them too and re-adds them at the top of Game once
+   the cursor is placed. */
+/* Add-context captured during the boot walk: the container (a0) and Game
+   topitem that vshmain passed when adding the fixed items. Reused to re-add
+   the captured copies directly (incremental, like a real disc/card insert),
+   so we avoid the "media changed" re-scan that causes a visible blink.
+   Relies on this container outliving the boot walk -- it does: it's the
+   long-lived Game-column list vshmain also adds to on a real disc insert. */
+static volatile void *game_a0 = 0;
+static volatile int game_topitem = 0;
+static volatile int game_ctx_captured = 0;
+
+static int start_at_ms_thread(SceSize args, void *argp)
+{
+	u32 obj;
+	int i;
+	(void)args; (void)argp;
+
+	/* Wait for the XMB-ready signal: the scene's current top-category field
+	   (obj+0x338) reaches the Game column's displayed index when Game is
+	   focused, which happens just after the cursor is placed -- so re-adding
+	   here keeps the cursor on Memory Stick. start_ms_game_index accounts for
+	   any hidden pre-Game categories (Game is 5 only if none are hidden).
+	   Poll until then, with a ~10s safety cap so a signal that never matches
+	   (unexpected layout/firmware) can't spin forever or leave the items
+	   hidden -- on timeout we re-add anyway; the cursor is long placed by
+	   then, so it still stays on Memory Stick. */
+	for (i = 0; i < 400; i++) {        /* 400 * 25ms = ~10s cap */
+		if (scene_ctx) {
+			obj = *(u32 *)(scene_ctx + 0xA6C);
+			if (obj && *(int *)(obj + 0x338) == start_ms_game_index)
+				break;
+		}
+		sceKernelDelayThread(25000);   /* 25ms */
+	}
+
+	/* Stop hiding, then re-add the saved copies directly -- incrementally,
+	   the way a real disc/card insert adds an item -- using the container +
+	   topitem captured during boot. No "media changed" re-scan, so the Game
+	   row isn't rebuilt and there's no blink. (The calls route through our
+	   filter via the prologue patch; boot_hide_for_ms is now clear so they
+	   pass through and get added.) */
+	boot_hide_for_ms = 0;
+	if (game_ctx_captured) {
+		int k;
+		/* Re-add the relocated ARK CFW items FIRST so they land at the TOP of
+		   Game (before Game Sharing); the fixed Game items go in after them.
+		   All deferred to here, after the cursor is placed, so it stays on MS. */
+		for (k = 0; k < captured_ark_count; k++)
+			AddVshItem((void *)game_a0, game_topitem, &captured_ark[k]);
+		if (umd_captured)
+			AddVshItem((void *)game_a0, game_topitem, &captured_umd);
+		if (gamedl_captured)
+			AddVshItem((void *)game_a0, game_topitem, &captured_gamedl);
+		if (savedata_captured)
+			AddVshItem((void *)game_a0, game_topitem, &captured_savedata);
+	}
+	return 0;
+}
 
 STMOD_HANDLER previous;
 
@@ -421,6 +551,8 @@ static int AdjustTopCategoryCountAndGetCount(void *ctx)
 	int count;
 	int new_count;
 
+	scene_ctx = (u32)ctx;   /* expose scene context to the START_AT_MEMORY_STICK thread */
+
 	obj = *(u32 *)((char *)ctx + 0xA6C);
 	if (!obj)
 		return 0;
@@ -596,6 +728,44 @@ int skip(SceVshItem *item, int location)
 	int idnm(char *name)
 	{
 		return strcmp(item->text, name);
+	}
+
+	/* START_AT_MEMORY_STICK: lazily spawn the show-savedata thread the first time
+	   skip() runs. skip() is called from vshmain's AddVshItem walk, i.e.
+	   from vshmain's runtime context -- the same context the (working)
+	   scene-dump thread was created from. Creating it from OnModuleStart
+	   (much earlier) produced a thread that never ran. */
+	if (start_at_ms_flag && !ms_thread_started) {
+		SceUID tid;
+		ms_thread_started = 1;
+		tid = sceKernelCreateThread("xmbih_show_savedata",
+			start_at_ms_thread, 0x18, 0x1000, 0, NULL);
+		if (tid >= 0)
+			sceKernelStartThread(tid, 0, NULL);
+	}
+
+	/* START_AT_MEMORY_STICK boot-hide. During the boot pass, force-hide the fixed
+	   Game items that precede Memory Stick (Game Sharing, Saved Data Utility,
+	   and -- when a disc is inserted -- the UMD item) so the cursor lands on
+	   MS. We capture a copy of each first; once the XMB is ready the post-boot
+	   thread clears boot_hide_for_ms and re-adds them directly via AddVshItem
+	   (see start_at_ms_thread). */
+	if (boot_hide_for_ms &&
+	    (!idnm("msgtop_game_savedata") || !idnm("msgtop_game_gamedl") ||
+	     !idnm("msgshare_umd"))) {
+		if (!idnm("msgtop_game_gamedl") && !gamedl_captured) {
+			memcpy(&captured_gamedl, item, sizeof(SceVshItem));
+			gamedl_captured = 1;
+		}
+		if (!idnm("msgtop_game_savedata") && !savedata_captured) {
+			memcpy(&captured_savedata, item, sizeof(SceVshItem));
+			savedata_captured = 1;
+		}
+		if (!idnm("msgshare_umd") && !umd_captured) {
+			memcpy(&captured_umd, item, sizeof(SceVshItem));
+			umd_captured = 1;
+		}
+		return 0;
 	}
 
 	if (!idnm("msg_signup") || !idnm("msg_ps_store") || !idnm("msg_information_board")) {
@@ -789,6 +959,22 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 			return 0;
 
 		topitem = adjusted_topitem;
+	}
+
+	/* START_AT_MEMORY_STICK: capture the container + Game topitem the first time we
+	   see one of the items we're hiding, so the worker thread can re-add the
+	   saved copies into the same place later without a re-scan.
+	   NOTE: this is the location-0 (phat/slim) path. On a PSP Go, Saved Data
+	   is walked via a separate call site (AddVshItemPatchedGameSavedataMs/Ef),
+	   so its native context isn't captured here and it'd be re-added with Game
+	   Sharing's context -- untested on Go. */
+	if (boot_hide_for_ms && !game_ctx_captured &&
+	    (!strcmp(item->text, "msgtop_game_gamedl") ||
+	     !strcmp(item->text, "msgtop_game_savedata") ||
+	     !strcmp(item->text, "msgshare_umd"))) {
+		game_a0 = a0;
+		game_topitem = topitem;
+		game_ctx_captured = 1;
 	}
 
 	/* Force-forward only the FIRST xmbctrl trigger we see -- that flips
@@ -1037,6 +1223,13 @@ int module_start(SceSize args, void *argp)
 	set[56] = cfg(global_category, "HIDE_ALL_VIDEO");
 	set[54] = cfg(global_category, "HIDE_ALL");
 	set[55] = cfg(global_category, "USE_PLUGIN");
+	start_at_ms_flag = cfg(global_category, "START_AT_MEMORY_STICK");
+	if (start_at_ms_flag) {
+		boot_hide_for_ms = 1;
+		/* Game's displayed index = 5 minus any hidden pre-Game categories,
+		   so the XMB-ready signal matches regardless of what's hidden. */
+		start_ms_game_index = adjust_topitem_for_hidden_categories(5);
+	}
 
 	xlog_raw_both("cfg: settings 1\n");
 	/* Settings */
