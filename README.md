@@ -58,7 +58,7 @@ Tested on:
       <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
       "Memory Stick" in the Category to the right
-      of the Settings category duplicates.</li>
+      of the "Settings" category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/v4vyOVKliQ0</td>
@@ -71,7 +71,7 @@ Tested on:
       <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
       "Memory Stick" in the Category to the right
-      of the Settings category duplicates.</li>
+      of the "Settings" category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/1nz6dfnWh-4</td>
@@ -84,7 +84,7 @@ Tested on:
       <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
       "Memory Stick" in the Category to the right
-      of the Settings category duplicates.</li>
+      of the "Settings" category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/dbXEe9qp_v0</td>
