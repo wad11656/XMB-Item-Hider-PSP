@@ -30,7 +30,7 @@ Tested on:
 <br><br><table>
 <tr>
   <td colspan="3">
-    <div align="center"><h4><ins><b>Known bugs when completely hiding Categories left of the "Game" Category</b></ins></h4></div>
+    <div align="center"><h4><ins><b>Known bugs when completely hiding Categories left of the "Game" category</b></ins></h4></div>
   </td>
 </tr>
 <tr>
@@ -57,8 +57,8 @@ Tested on:
     <ul>
       <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
-      "Memory Stick" in the Category to the right
-      of the "Settings" Category duplicates.</li>
+      "Memory Stick" in the category to the right
+      of the "Settings" category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/v4vyOVKliQ0</td>
@@ -70,8 +70,8 @@ Tested on:
     <ul>
       <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
-      "Memory Stick" in the Category to the right
-      of the "Settings" Category duplicates.</li>
+      "Memory Stick" in the category to the right
+      of the "Settings" category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/1nz6dfnWh-4</td>
@@ -83,8 +83,8 @@ Tested on:
     <ul>
       <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
-      "Memory Stick" in the Category to the right
-      of the "Settings" Category duplicates.</li>
+      "Memory Stick" in the category to the right
+      of the "Settings" category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/dbXEe9qp_v0</td>
