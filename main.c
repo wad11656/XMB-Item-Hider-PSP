@@ -507,7 +507,13 @@ static int AdjustTopCategoryCountAndGetCount(void *ctx)
 
 static void PatchTopCategories(u32 text_addr)
 {
+	u32 *meta0;
+	u32 *meta1;
+	u32 *meta2;
 	XmbTopCategory *table;
+	u32 filtered_meta0[8];
+	u32 filtered_meta1[8];
+	u32 filtered_meta2[8];
 	XmbTopCategory filtered[8];
 	int i;
 	int out = 0;
@@ -523,16 +529,30 @@ static void PatchTopCategories(u32 text_addr)
 		return;
 	}
 
-	/* Compact the XmbTopCategory entries (icons + text) only. We previously
-	   also mutated three u32[8] arrays sitting immediately before the
-	   table (wad11656's "meta0/meta1/meta2"), but their purpose is
-	   unknown -- and on ARK-5 the UMD-preview code path indexes into one
-	   of them by the original (pre-compaction) category index, so
-	   zero-padding the tail crashed the system when a UMD was inserted
-	   with any category hidden. Leaving them alone fixes the crash, and
-	   the visual category hide still works because the runtime count
-	   patch (AdjustTopCategoryCountAndGetCount) is what actually shrinks
-	   the column count vshmain renders. */
+	/* Compact the XmbTopCategory icon/text table AND the three parallel
+	   u32[8] arrays sitting immediately before it (wad11656's
+	   "meta0/meta1/meta2"). These hold per-category state that vshmain
+	   reads alongside the visual table when it builds each column, so they
+	   must stay in lock-step with the table -- otherwise every column from
+	   the hidden index onward shows one category's label/items wrapped
+	   around the previous category's behaviour, which is the "everything
+	   after the hidden category is broken" bug.
+
+	   Preserve the original tail-slot meta data instead of zeroing it.
+	   vshmain's UMD-preview path still performs some hardcoded lookups by
+	   original category index, so those backing arrays need valid data in
+	   their original slots.
+
+	   Keep the visible table tail blanked, though. If the runtime count
+	   trim does not fire on a given setup, preserving table tail entries
+	   makes a full category hide look like an ordinary empty category.
+	   Zeroing only the visible table tail preserves "2 = hide category"
+	   while still keeping the meta arrays available for original-index
+	   firmware lookups. */
+
+	meta0 = (u32 *)((char *)table - (8 * sizeof(u32) * 3));
+	meta1 = (u32 *)((char *)table - (8 * sizeof(u32) * 2));
+	meta2 = (u32 *)((char *)table - (8 * sizeof(u32) * 1));
 
 	for (i = 0; i < 8; i++) {
 		int hide = hide_top_category(i);
@@ -543,6 +563,9 @@ static void PatchTopCategories(u32 text_addr)
 			continue;
 		}
 
+		filtered_meta0[out] = meta0[i];
+		filtered_meta1[out] = meta1[i];
+		filtered_meta2[out] = meta2[i];
 		memcpy(&filtered[out], &table[i], sizeof(filtered[out]));
 		out++;
 	}
@@ -553,12 +576,19 @@ static void PatchTopCategories(u32 text_addr)
 	}
 
 	while (out < 8) {
+		filtered_meta0[out] = meta0[out];
+		filtered_meta1[out] = meta1[out];
+		filtered_meta2[out] = meta2[out];
 		memset(&filtered[out], 0, sizeof(filtered[out]));
 		out++;
 	}
 
+	memcpy(meta0, filtered_meta0, sizeof(filtered_meta0));
+	memcpy(meta1, filtered_meta1, sizeof(filtered_meta1));
+	memcpy(meta2, filtered_meta2, sizeof(filtered_meta2));
 	memcpy(table, filtered, sizeof(filtered));
-	xlog("topcat: table=0x%08X compacted\n", (u32)table);
+	xlog("topcat: meta0=0x%08X meta1=0x%08X meta2=0x%08X table=0x%08X compacted\n",
+		(u32)meta0, (u32)meta1, (u32)meta2, (u32)table);
 }
 
 int skip(SceVshItem *item, int location)
