@@ -6,4 +6,6 @@ flahes-pspGo/
 *.o
 *.elf
 *.prx
+ark_xmbctrl.dec
+vshmain_text.bin
 !release/*.prx

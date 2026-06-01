@@ -202,19 +202,34 @@ static int xmbctrl_triggered = 0;
 static u32 add_vsh_trampoline[4] __attribute__((section(".data"), aligned(4))) = { 0, 0, 0, 0 };
 
 int skip(SceVshItem *item, int location);  /* forward decl, defined further down */
+static int is_ark_custom_item(const char *text);
+static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
+	int *out_topitem, const char *source);
 
 int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 {
+	int adjusted_topitem = topitem;
+
 	/* Items reaching us here either came from xmbctrl forwarding (the
 	   trigger item, or its CFW item insertions) or any other caller of
 	   the real AddVshItem. Apply the user's hide rules and forward via
 	   the trampoline if allowed. Location 0 is the default; the
 	   trigger items and CFW item names don't depend on location, so
-	   that's fine. */
+	   that's fine.
+	   Do NOT compact ordinary items here: on ARK this filter sits behind
+	   our higher-level wrapper, so normal items reaching this point have
+	   already had their topitem adjusted once. Re-adjusting them shifts
+	   Game->Video, Video->Music, etc. Only the ARK-injected CFW items need
+	   remapping at this layer because they bypass the wrapper. */
+	if (is_ark_custom_item(item->text)) {
+		if (!prepare_topitem_for_item(item, topitem, &adjusted_topitem, "filter"))
+			return 0;
+	}
+
 	if(skip(item, 0)) {
 		int (*trampoline)(void *, int, SceVshItem *) =
 			(int(*)(void *, int, SceVshItem *))add_vsh_trampoline;
-		return trampoline(a0, topitem, item);
+		return trampoline(a0, adjusted_topitem, item);
 	}
 	return 0;
 }
@@ -658,6 +673,33 @@ static int is_game_resume_item(const char *text)
 	return !strcmp(text, "msg_game_hibernation");
 }
 
+static int remap_ark_topitem(int incoming_topitem, int *out_topitem);
+
+static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
+	int *out_topitem, const char *source)
+{
+	if (is_ark_custom_item(item->text)) {
+		if (!remap_ark_topitem(incoming_topitem, out_topitem)) {
+			xlog("%s ark item: text='%s' topitem=%d dropped\n",
+				source, item->text, incoming_topitem);
+			return 0;
+		}
+
+		xlog("%s ark item: text='%s' topitem=%d adjusted=%d\n",
+			source, item->text, incoming_topitem, *out_topitem);
+		return 1;
+	}
+
+	*out_topitem = adjust_topitem_for_hidden_categories(incoming_topitem);
+
+	if (is_game_resume_item(item->text)) {
+		xlog("%s resume item: text='%s' topitem=%d adjusted=%d\n",
+			source, item->text, incoming_topitem, *out_topitem);
+	}
+
+	return 1;
+}
+
 static int remap_ark_topitem(int incoming_topitem, int *out_topitem)
 {
 	/*
@@ -710,30 +752,13 @@ static int is_xmbctrl_trigger(const char *text)
 
 int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 {
-	if (is_ark_custom_item(item->text)) {
-		int original_topitem = topitem;
-		int mapped_topitem = topitem;
+	{
+		int adjusted_topitem;
 
-		if (!remap_ark_topitem(topitem, &mapped_topitem)) {
-			xlog("ark item: text='%s' topitem=%d dropped\n",
-				item->text, original_topitem);
+		if (!prepare_topitem_for_item(item, topitem, &adjusted_topitem, "wrapper"))
 			return 0;
-		}
 
-		topitem = mapped_topitem;
-
-		xlog("ark item: text='%s' topitem=%d adjusted=%d\n",
-			item->text, original_topitem, topitem);
-	}
-	else if (is_game_resume_item(item->text)) {
-		int original_topitem = topitem;
-
-		topitem = adjust_topitem_for_hidden_categories(topitem);
-		xlog("resume item: text='%s' topitem=%d adjusted=%d\n",
-			item->text, original_topitem, topitem);
-	}
-	else {
-		topitem = adjust_topitem_for_hidden_categories(topitem);
+		topitem = adjusted_topitem;
 	}
 
 	/* Force-forward only the FIRST xmbctrl trigger we see -- that flips
