@@ -538,13 +538,17 @@ static void PatchTopCategories(u32 text_addr)
 	   around the previous category's behaviour, which is the "everything
 	   after the hidden category is broken" bug.
 
-	   For the tail slots that go unused after compaction we PRESERVE the
-	   original meta values rather than zeroing them. vshmain's UMD-preview
-	   path indexes a meta array by Game's ORIGINAL (pre-compaction) index,
-	   so feeding NULL there crashes the system; leaving the originals in
-	   place is the conservative choice. The visual table tail is still
-	   blanked (the AdjustTopCategoryCountAndGetCount patch trims the
-	   rendered column count, so the blanked entries are never drawn). */
+	   Preserve the original tail-slot meta data instead of zeroing it.
+	   vshmain's UMD-preview path still performs some hardcoded lookups by
+	   original category index, so those backing arrays need valid data in
+	   their original slots.
+
+	   Keep the visible table tail blanked, though. If the runtime count
+	   trim does not fire on a given setup, preserving table tail entries
+	   makes a full category hide look like an ordinary empty category.
+	   Zeroing only the visible table tail preserves "2 = hide category"
+	   while still keeping the meta arrays available for original-index
+	   firmware lookups. */
 
 	meta0 = (u32 *)((char *)table - (8 * sizeof(u32) * 3));
 	meta1 = (u32 *)((char *)table - (8 * sizeof(u32) * 2));
@@ -575,13 +579,7 @@ static void PatchTopCategories(u32 text_addr)
 		filtered_meta0[out] = meta0[out];
 		filtered_meta1[out] = meta1[out];
 		filtered_meta2[out] = meta2[out];
-		/* Tail-preserve the table entry too (was memset-to-0). vshmain
-		   has hardcoded `table[5]`-style index reads for the UMD-preview
-		   path; with Game's original slot zeroed they dereference NULL
-		   and crash on UMD insert. The runtime count patch
-		   (AdjustTopCategoryCountAndGetCount) still trims the rendered
-		   column count, so these preserved tail entries are never drawn. */
-		memcpy(&filtered[out], &table[out], sizeof(filtered[out]));
+		memset(&filtered[out], 0, sizeof(filtered[out]));
 		out++;
 	}
 
