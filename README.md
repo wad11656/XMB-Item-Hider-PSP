@@ -55,7 +55,7 @@ Tested on:
   <td><ins>After sleep+wake:</ins>
   <br>
     <ul>
-      <li>"Game" > "Memory Stick" duplicates.</li>
+      <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
       "Memory Stick" in the Category to the right
       of the Settings category duplicates.</li>
@@ -68,7 +68,7 @@ Tested on:
   <td><ins>After Memory Stick removal+re-insert:</ins>
   <br>
     <ul>
-      <li>"Game" > "Memory Stick" duplicates.</li>
+      <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
       "Memory Stick" in the Category to the right
       of the Settings category duplicates.</li>
@@ -81,7 +81,7 @@ Tested on:
   <td><ins>After entering+exiting USB Mode:</ins>
   <br>
     <ul>
-      <li>"Game" > "Memory Stick" duplicates.</li>
+      <li>Game > "Memory Stick" duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>,
       "Memory Stick" in the Category to the right
       of the Settings category duplicates.</li>
