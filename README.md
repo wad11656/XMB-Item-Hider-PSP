@@ -17,15 +17,17 @@ Tested on:
 
 &nbsp;&nbsp;&nbsp;&nbsp;3b\. **Non-ARK CFW:** Add `ms0:/SEPLUGINS/xmbih.prx 1` _(non-PSP Go)_ or `ef0:/SEPLUGINS/xmbih.prx 1` _(PSP Go)_ to your `<StorageDevice>:/SEPLUGINS/VSH.txt`.<br>
 
-4\. Open the `.ini` file in a text editor and hide icons by entering a `1` value, and completely hide Global XMB categories with a `2` value.<br>
+4\. Open the `.ini` file in a text editor and hide menu items by entering a `1` value, and completely hide Global XMB categories with a `2` value.<br>
 
 5\. Boot your PSP/Reset the VSH (XMB).
 
 ## Bonus Features
 
 #### <ins>Start XMB on Memory Stick:</ins>
-Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `xmbih.ini` to make the XMB boot with the cursor on **Memory Stick** in the `Game` category instead of `Saved Data Utility` / `Game Sharing`. This setting **force-hides the "UMD Update" item** (the same effect as `UMD_UPDATE = 1`) to prevent crashes.<br><img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/e25a053c-27b9-4be3-a5ac-837bf6f07c43" />
+Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `xmbih.ini` to make the XMB boot with the cursor on **Memory Stick** in the `Game` category instead of `Saved Data Utility` / `Game Sharing`.
+<br><img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/e25a053c-27b9-4be3-a5ac-837bf6f07c43" />
 
+ - This setting **force-hides the "UMD Update" item** (the equivalent of setting `UMD_UPDATE = 1` in `xmbih.ini`) in order to prevent crashes.
 #### <ins>Relocate ARK's "Extras" items:</ins>
 On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware Settings**, **Plugins Manager**, and **Custom Launcher**. Using flags under `[Global]` in `xmbih.ini`, you can relocate these items:
 
