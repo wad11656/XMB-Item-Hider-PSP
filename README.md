@@ -24,7 +24,7 @@ Tested on:
 ## Bonus Features
 
 #### <ins>Start XMB on Memory Stick:</ins>
-Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `xmbih.ini` to make the XMB boot with the cursor on **Memory Stick** in the `Game` category instead of `Saved Data Utility` / `Game Sharing`. This setting **force-hides the "UMD Update" item** (the same effect as `UMD_UPDATE = 1`) to prevent crashes.
+Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `xmbih.ini` to make the XMB boot with the cursor on **Memory Stick** in the `Game` category instead of `Saved Data Utility` / `Game Sharing`. This setting **force-hides the "UMD Update" item** (the same effect as `UMD_UPDATE = 1`) to prevent crashes.<br><img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/e25a053c-27b9-4be3-a5ac-837bf6f07c43" />
 
 #### <ins>Relocate ARK's "Extras" items:</ins>
 On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware Settings**, **Plugins Manager**, and **Custom Launcher**. Using flags under `[Global]` in `xmbih.ini`, you can relocate these items:
