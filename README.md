@@ -8,7 +8,7 @@ Tested on:
 - 6.61 ARK-4
 - 6.61 ARK-5
 
-#### <ins>Installation:</ins>
+## Installation:
 1\. Download & Extract the `.zip` from [the latest Release](https://github.com/wad11656/XMB-Item-Hider-PSP/releases/latest)<br>
 
 2\. Move the included `.prx` and `.ini` to `<MemoryStick>:/SEPLUGINS` _(non-PSP Go)_ or `<InternalStorage>:/SEPLUGINS` _(PSP Go)_.<br>
@@ -21,31 +21,28 @@ Tested on:
 
 5\. Boot your PSP/Reset the VSH (XMB).
 
-#### <ins>Start on Memory Stick:</ins>
-Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `.ini` to make the XMB boot with the cursor on **Memory Stick** in the `Game` category instead of `Saved Data Utility` / `Game Sharing`.
+## Bonus Features
 
-It briefly hides those items (and the UMD disc, if inserted) during boot so the cursor settles on Memory Stick, then re-adds them automatically once the XMB has finished loading — so everything stays accessible. The re-add is tied to a detected "XMB ready" signal (no fixed delay).
+#### <ins>Start XMB on Memory Stick:</ins>
+Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `xmbih.ini` to make the XMB boot with the cursor on **Memory Stick** in the `Game` category instead of `Saved Data Utility` / `Game Sharing`. This setting **force-hides the "UMD Update" item** (the same effect as `UMD_UPDATE = 1`) to prevent crashes.
 
-While `START_AT_MEMORY_STICK` is enabled it also **force-hides the "UMD Update" item** (the same effect as `UMD_UPDATE = 1`). This is required: booting / resetting the VSH with that item present and a UMD inserted crashes the XMB.
+#### <ins>Relocate ARK's "Extras" items:</ins>
+On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware Settings**, **Plugins Manager**, and **Custom Launcher**. Using flags under `[Global]` in `xmbih.ini`, you can relocate these items:
 
-#### <ins>Relocating the "Extras" CFW items:</ins>
-On ARK CFW the `Extras` category holds three injected items — **Custom Firmware Settings**, **Plugins Manager**, and **Custom Launcher**. `HIDE_ALL_EXTRAS` can hide `Extras` while keeping those items reachable:
+- **`MOVE_ARK_EXTRAS = 1`** — Move **Custom Launcher → `Game`**, and **Custom Firmware Settings & Plugins Manager → end of `Settings`** (with updated Settings-column icons)!<br><img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/1438e70e-cdcd-49c9-bf82-8bb1e8e2e983" />
+- **`HIDE_ALL_EXTRAS = 2`** — Mimics ARK CFW when the `Extras` category is absent: Hide `Extras` completely, and move all three ARK items into `Game`.
+  - Introduces bugs, so Fake VSH Region should be used to hide `Extras` instead--see **Known Limitations** below.
 
-- **`HIDE_ALL_EXTRAS = 2`** — hide `Extras` and move all three items into `Game`.
-- **`MOVE_ARK_EXTRAS = 1`** — leave `Extras` visible, but move the ARK-injected items out of it: **Custom Launcher → `Game`**, **Custom Firmware Settings + Plugins Manager → end of `Settings`** (repointed to Settings-column icons). Non-ARK items already in `Extras` are left alone.
-
-`MOVE_ARK_EXTRAS = 1` does not hide `Extras`, so it does not need a fake VSH region. If your firmware region already hides `Extras`, that firmware behavior still applies; the plugin only controls where ARK's own injected items land.
-
-#### <ins>Known Limitations:</ins>
-- You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in the `.ini` file--only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
+## Known Limitations:
+- You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in the `xmbih.ini` file--only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
   - `Settings` *does* get hidden with `HIDE_ALL = 2`.
 - Completely hiding any category to the left of the `Game` category can cause buggy behavior with `Game` menu items. (i.e., Duplicated `Memory Stick` entries; Deleted `Resume Game` entries don't properly disappear until the next full VSH reset.)
-  - Completely hiding the "Extras" category via the plugin adds additional bugs. If you want to hide "Extras", there is already a safe CFW way to do so: Just change your VSH region to one of the following in your CFW settings:
+  - Completely hiding the `Extras` category via the plugin adds additional bugs. If you want to hide `Extras`, there is already a safe CFW way to do so: Just change your VSH region to one of the following in your CFW settings:
 <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
 <br><br><table>
 <tr>
   <td colspan="3">
-    <div align="center"><h4><ins><b>Known bugs when completely hiding categories left of the "Game" category</b></ins></h4>
+    <div align="center"><h4><ins><b>Known bugs when completely hiding categories left of the <code>Game</code> category</b></ins></h4>
     </div>
   </td>
 </tr>
@@ -65,21 +62,21 @@ On ARK CFW the `Extras` category holds three injected items — **Custom Firmwar
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td><i>(PSP Go)</i> Deleting "Resume Game"<br>doesn't apply until VSH reset</td>
+  <td><i>(PSP Go)</i> Deleting <code>Resume Game</code><br>doesn't apply until VSH reset</td>
   <td>https://youtu.be/A1_ZhReEZRM</td>
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td colspan="3"><div align="center"><ins>"Memory Stick" entries get duplicated</ins>
+  <td colspan="3"><div align="center"><ins><code>Memory Stick</code> entries get duplicated</ins>
 </tr>
 <tr>
   <td><i>(PSP Go)</i> <ins>After sleep+wake:</ins>
   <br>
     <ul>
-      <li>Game > "Memory Stick" duplicates.</li>
+      <li><code>Game</code> > <code>Memory Stick</code> duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>:
-      "Memory Stick" in the category to the right
-      of the "Settings" category duplicates.</li>
+      <code>Memory Stick</code> in the category to the right
+      of the <code>Settings</code> category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/v4vyOVKliQ0</td>
@@ -89,10 +86,10 @@ On ARK CFW the `Extras` category holds three injected items — **Custom Firmwar
   <td><ins>After Memory Stick removal+re-insert:</ins>
   <br>
     <ul>
-      <li>Game > "Memory Stick" duplicates.</li>
+      <li><code>Game</code> > <code>Memory Stick</code> duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>:
-      "Memory Stick" in the category to the right
-      of the "Settings" category duplicates.</li>
+      <code>Memory Stick</code> in the category to the right
+      of the <code>Settings</code> category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/1nz6dfnWh-4</td>
@@ -102,10 +99,10 @@ On ARK CFW the `Extras` category holds three injected items — **Custom Firmwar
   <td><ins>After entering+exiting USB Mode:</ins>
   <br>
     <ul>
-      <li>Game > "Memory Stick" duplicates.</li>
+      <li><code>Game</code> > <code>Memory Stick</code> duplicates.</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>:
-      "Memory Stick" in the category to the right
-      of the "Settings" category duplicates.</li>
+      <code>Memory Stick</code> in the category to the right
+      of the <code>Settings</code> category duplicates.</li>
     </ul>
   </td>
   <td>https://youtu.be/dbXEe9qp_v0</td>
