@@ -459,12 +459,16 @@ static XmbTopCategory *find_top_category_table(u32 text_addr)
  *   Extras or its non-ARK items: Custom Firmware Settings + Plugins Manager go
  *   to PSP Settings, while the remaining ARK items go to Game.
  *
- * On a fake VSH region that already drops Extras (Russia/China), ARK itself
- * moves the CFW items to Game and the category list keeps its full layout, so
- * XMBIH must NOT also count-patch Extras (that would double-hide and desync the
- * Game-item paths). We still detect the region so ARK items can be routed by
- * name independent of how Extras became hidden.
+ * On a fake VSH region that already drops Extras (Latin America/Hong Kong/
+ * Taiwan/Russia/China/Debug I), ARK itself moves the CFW items to Game and
+ * the category list keeps its full layout, so XMBIH must NOT also count-patch
+ * Extras (that would double-hide and desync the Game-item paths). We still
+ * detect the region so ARK items can be routed by name independent of how
+ * Extras became hidden.
  */
+#define FAKE_REGION_LATIN_AMERICA  6
+#define FAKE_REGION_HONGKONG       8
+#define FAKE_REGION_TAIWAN         9
 #define FAKE_REGION_RUSSIA       10
 #define FAKE_REGION_CHINA        11
 #define FAKE_REGION_DEBUG_TYPE_I 12
@@ -478,9 +482,11 @@ static int fake_region_hides_extras = 0;
 static int fake_region_value_hides_extras(int vshregion)
 {
 	/* Regions known to drop the Extras column (kept in sync with
-	   game-categories-lite). wad also lists Latin America / Hong Kong / Taiwan;
-	   add them here + in cat_lite if needed. */
-	return vshregion == FAKE_REGION_RUSSIA ||
+	   game-categories-lite). */
+	return vshregion == FAKE_REGION_LATIN_AMERICA ||
+	       vshregion == FAKE_REGION_HONGKONG ||
+	       vshregion == FAKE_REGION_TAIWAN ||
+	       vshregion == FAKE_REGION_RUSSIA ||
 	       vshregion == FAKE_REGION_CHINA ||
 	       vshregion == FAKE_REGION_DEBUG_TYPE_I;
 }
