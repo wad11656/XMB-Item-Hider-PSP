@@ -31,8 +31,8 @@ Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `xmbih.ini` to make the 
 #### <ins>Relocate ARK's "Extras" items:</ins>
 On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware Settings**, **Plugins Manager**, and **Custom Launcher**. Using flags under `[Global]` in `xmbih.ini`, you can relocate these items:
 
-- **`MOVE_ARK_EXTRAS = 1`** — Move **Custom Launcher → `Game`**, and **Custom Firmware Settings & Plugins Manager → end of `Settings`** (with updated Settings-column icons)!<br><img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/1438e70e-cdcd-49c9-bf82-8bb1e8e2e983" />
-- **`HIDE_ALL_EXTRAS = 2`** — Mimics ARK CFW when the `Extras` category is absent: Hide `Extras` completely, and move all three ARK items into `Game`.
+- **`MOVE_ARK_EXTRAS = 1`** — Moves **Custom Launcher → `Game`**, and **Custom Firmware Settings & Plugins Manager → end of `Settings`** (with updated Settings-column icons)!<br><img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/1438e70e-cdcd-49c9-bf82-8bb1e8e2e983" />
+- **`HIDE_ALL_EXTRAS = 2`** — Mimics ARK CFW when the `Extras` category is absent: Hides `Extras` completely, and moves all three ARK items into `Game`.
   - Introduces bugs, so Fake VSH Region should be used to hide `Extras` instead—see **Known Limitations** below.
 
 ## Known Limitations:
