@@ -2,7 +2,7 @@ TARGET = xmbih
 OBJS = main.o minIni.o
 
 MININI_DEFINES = -DNDEBUG -DINI_READONLY -DINI_FILETYPE=SceUID -DPORTABLE_STRNICMP -DINI_NOFLOAT
-CFLAGS = -O2 -Os -G0 -Wall -std=gnu99 -fshort-wchar -fno-pic -mno-check-zero-division $(MININI_DEFINES) -DKPRINTF_ENABLED -DCONFIG_6xx=1
+CFLAGS = -Os -G0 -Wall -std=gnu99 -fshort-wchar -fno-pic -mno-check-zero-division $(MININI_DEFINES) -DKPRINTF_ENABLED -DCONFIG_6xx=1
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 ASFLAGS = $(CFLAGS)
 
