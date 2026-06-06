@@ -1114,7 +1114,7 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(0, item))
-		AddVshItem(a0, topitem, item);
+		return AddVshItem(a0, topitem, item);
 
 	return 0;
 }
@@ -1125,7 +1125,7 @@ int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(1, item))
-		AddVshItem(a0, topitem, item);
+		return AddVshItem(a0, topitem, item);
 
 	return 0;
 }
@@ -1136,7 +1136,7 @@ int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(2, item))
-		AddVshItem(a0, topitem, item);
+		return AddVshItem(a0, topitem, item);
 
 	return 0;
 }
@@ -1147,7 +1147,7 @@ int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(3, item))
-		AddVshItem(a0, topitem, item);
+		return AddVshItem(a0, topitem, item);
 
 	return 0;
 }
@@ -1158,7 +1158,7 @@ int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(4, item))
-		AddVshItem(a0, topitem, item);
+		return AddVshItem(a0, topitem, item);
 
 	return 0;
 }
@@ -1169,7 +1169,7 @@ int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(5, item))
-		AddVshItem(a0, topitem, item);
+		return AddVshItem(a0, topitem, item);
 
 	return 0;
 }
@@ -1180,7 +1180,7 @@ int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(6, item))
-		AddVshItem(a0, topitem, item);
+		return AddVshItem(a0, topitem, item);
 
 	return 0;
 }
