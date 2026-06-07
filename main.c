@@ -30,6 +30,8 @@
 
 #include <pspsdk.h>
 #include <pspkernel.h>
+#include <pspiofilemgr.h>
+#include <pspumd.h>
 #include <systemctrl.h>
 #include <systemctrl_se.h>
 #include <main.h>
@@ -149,12 +151,138 @@ long strtol(const char *s, char **end, int base)
 
 static void xlog_raw_both(const char *msg)
 {
-	(void)msg;
+	SceUID fd;
+
+	fd = sceIoOpen("ms0:/xmbih.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
+	if (fd < 0)
+		return;
+
+	sceIoWrite(fd, msg, strlen(msg));
+	sceIoClose(fd);
+}
+
+static void xlog_append_char(char *buf, int *pos, int max, char ch)
+{
+	if (*pos < max - 1)
+		buf[(*pos)++] = ch;
+}
+
+static void xlog_append_string(char *buf, int *pos, int max, const char *s)
+{
+	if (!s)
+		s = "(null)";
+
+	while (*s)
+		xlog_append_char(buf, pos, max, *s++);
+}
+
+static void xlog_append_uint(char *buf, int *pos, int max, unsigned int value,
+	unsigned int base, int width, int zero_pad, int uppercase)
+{
+	char tmp[16];
+	int len = 0;
+	const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+
+	if (base < 2 || base > 16)
+		return;
+
+	do {
+		tmp[len++] = digits[value % base];
+		value /= base;
+	} while (value && len < (int)sizeof(tmp));
+
+	while (len < width && len < (int)sizeof(tmp))
+		tmp[len++] = zero_pad ? '0' : ' ';
+
+	while (len > 0)
+		xlog_append_char(buf, pos, max, tmp[--len]);
+}
+
+static void xlog_append_int(char *buf, int *pos, int max, int value,
+	int width, int zero_pad)
+{
+	unsigned int magnitude;
+
+	if (value < 0) {
+		xlog_append_char(buf, pos, max, '-');
+		magnitude = (unsigned int)(-value);
+		if (width > 0)
+			width--;
+	} else {
+		magnitude = (unsigned int)value;
+	}
+
+	xlog_append_uint(buf, pos, max, magnitude, 10, width, zero_pad, 0);
 }
 
 static void xlog(const char *fmt, ...)
 {
-	(void)fmt;
+	char buf[256];
+	int pos = 0;
+	va_list ap;
+
+	va_start(ap, fmt);
+	while (*fmt) {
+		if (*fmt != '%') {
+			xlog_append_char(buf, &pos, sizeof(buf), *fmt++);
+			continue;
+		}
+
+		fmt++;
+		if (*fmt == '%') {
+			xlog_append_char(buf, &pos, sizeof(buf), *fmt++);
+			continue;
+		}
+
+		{
+			int zero_pad = 0;
+			int width = 0;
+
+			if (*fmt == '0') {
+				zero_pad = 1;
+				fmt++;
+			}
+			while (*fmt >= '0' && *fmt <= '9') {
+				width = (width * 10) + (*fmt - '0');
+				fmt++;
+			}
+
+			switch (*fmt) {
+				case 'd':
+					xlog_append_int(buf, &pos, sizeof(buf), va_arg(ap, int),
+						width, zero_pad);
+					break;
+				case 'u':
+					xlog_append_uint(buf, &pos, sizeof(buf), va_arg(ap, unsigned int),
+						10, width, zero_pad, 0);
+					break;
+				case 'x':
+					xlog_append_uint(buf, &pos, sizeof(buf), va_arg(ap, unsigned int),
+						16, width, zero_pad, 0);
+					break;
+				case 'X':
+					xlog_append_uint(buf, &pos, sizeof(buf), va_arg(ap, unsigned int),
+						16, width, zero_pad, 1);
+					break;
+				case 's':
+					xlog_append_string(buf, &pos, sizeof(buf), va_arg(ap, const char *));
+					break;
+				case 'c':
+					xlog_append_char(buf, &pos, sizeof(buf), (char)va_arg(ap, int));
+					break;
+				default:
+					xlog_append_char(buf, &pos, sizeof(buf), '%');
+					xlog_append_char(buf, &pos, sizeof(buf), *fmt);
+					break;
+			}
+			if (*fmt)
+				fmt++;
+		}
+	}
+	va_end(ap);
+
+	buf[pos] = 0;
+	xlog_raw_both(buf);
 }
 
 /* AddVshItem here is *not* the literal real AddVshItem; it's whatever the
@@ -319,6 +447,109 @@ static volatile void *game_a0 = 0;
 static volatile int game_topitem = 0;
 static volatile int game_ctx_captured = 0;
 
+static int path_is_dir(const char *path)
+{
+	SceUID fd;
+
+	fd = sceIoDopen(path);
+	if (fd < 0)
+		return 0;
+
+	sceIoDclose(fd);
+	return 1;
+}
+
+static int detect_boot_umd_video(void)
+{
+	pspUmdInfo info;
+	int ret;
+
+	if (sceUmdCheckMedium() <= 0)
+		return 0;
+
+	memset(&info, 0, sizeof(info));
+	info.size = sizeof(info);
+
+	ret = sceUmdGetDiscInfo(&info);
+	if (ret < 0) {
+		/* During VSH startup the drive can still be initializing; give it a short
+		   chance to settle so START_AT_MEMORY_STICK can be disabled before the
+		   XMB item walk begins on movie boots. */
+		sceUmdWaitDriveStatWithTimer(PSP_UMD_READY, 250000);
+		ret = sceUmdGetDiscInfo(&info);
+	}
+
+	if (ret < 0) {
+		xlog("start_ms: umd info unavailable ret=0x%08X\n", ret);
+		return 0;
+	}
+
+	xlog("start_ms: umd type=0x%X\n", info.type);
+	return (info.type & PSP_UMD_TYPE_VIDEO) != 0;
+}
+
+static int detect_mounted_umd_video(void)
+{
+	int has_video;
+	int has_game;
+
+	has_video = path_is_dir("disc0:/UMD_VIDEO");
+	has_game = path_is_dir("disc0:/PSP_GAME");
+
+	if (has_video || has_game)
+		xlog("start_ms: disc0 probe video=%d game=%d\n", has_video, has_game);
+
+	return has_video;
+}
+
+static int maybe_disable_start_at_ms_from_disc_layout(SceVshItem *item, int location)
+{
+	if (!start_at_ms_flag || !boot_hide_for_ms)
+		return 0;
+
+	if (!detect_mounted_umd_video())
+		return 0;
+
+	/* vshmain has mounted a movie-disc layout on disc0:, so the START_AT
+	   Game/Memory Stick override is wrong for this boot. Stop hiding now.
+	   If the worker thread already started, clearing boot_hide_for_ms lets it
+	   exit its wait loop on the next poll and restore any Game items we had
+	   already captured before the movie probe became available. */
+	boot_hide_for_ms = 0;
+	start_at_ms_flag = 0;
+	umd_captured = 0;
+	xlog("start_ms: disabled via disc0 probe text='%s' loc=%d\n",
+		item->text, location);
+	return 1;
+}
+
+static void maybe_disable_start_at_ms_for_movie_boot(SceVshItem *item, int location,
+	int topitem)
+{
+	int video_topitem;
+
+	if (!start_at_ms_flag || !boot_hide_for_ms)
+		return;
+
+	if (strcmp(item->text, "msgshare_umd"))
+		return;
+
+	video_topitem = adjust_topitem_for_hidden_categories(4);
+	xlog("start_ms: msgshare_umd loc=%d topitem=%d video_topitem=%d\n",
+		location, topitem, video_topitem);
+	if (location != 3 && topitem != video_topitem)
+		return;
+
+	/* A UMD movie is being routed into the Video/Movie column, so the XMB's
+	   natural boot target is Movie rather than Game. Disable the boot-hide
+	   override before this item reaches skip(), otherwise it'll get captured
+	   and later re-added into Game. */
+	boot_hide_for_ms = 0;
+	start_at_ms_flag = 0;
+	xlog("start_ms: disabled for movie boot loc=%d topitem=%d\n",
+		location, topitem);
+}
+
 static int start_at_ms_thread(SceSize args, void *argp)
 {
 	u32 obj;
@@ -335,6 +566,8 @@ static int start_at_ms_thread(SceSize args, void *argp)
 	   hidden -- on timeout we re-add anyway; the cursor is long placed by
 	   then, so it still stays on Memory Stick. */
 	for (i = 0; i < 400; i++) {        /* 400 * 25ms = ~10s cap */
+		if (!boot_hide_for_ms)
+			break;
 		if (scene_ctx) {
 			obj = *(u32 *)(scene_ctx + 0xA6C);
 			if (obj && *(int *)(obj + 0x338) == start_ms_game_index)
@@ -833,6 +1066,10 @@ int skip(SceVshItem *item, int location)
 	if (boot_hide_for_ms &&
 	    (!idnm("msgtop_game_savedata") || !idnm("msgtop_game_gamedl") ||
 	     !idnm("msgshare_umd"))) {
+		if (maybe_disable_start_at_ms_from_disc_layout(item, location))
+			return 1;
+		xlog("start_ms: boot-hide capture text='%s' loc=%d\n",
+			item->text, location);
 		if (!idnm("msgtop_game_gamedl") && !gamedl_captured) {
 			memcpy(&captured_gamedl, item, sizeof(SceVshItem));
 			gamedl_captured = 1;
@@ -1090,6 +1327,8 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 		topitem = adjusted_topitem;
 	}
 
+	maybe_disable_start_at_ms_for_movie_boot(item, 0, topitem);
+
 	/* START_AT_MEMORY_STICK: capture the container + Game topitem the first time we
 	   see one of the items we're hiding, so the worker thread can re-add the
 	   saved copies into the same place later without a re-scan.
@@ -1122,6 +1361,7 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
+	maybe_disable_start_at_ms_for_movie_boot(item, 1, topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(1, item))
@@ -1133,6 +1373,7 @@ int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
+	maybe_disable_start_at_ms_for_movie_boot(item, 2, topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(2, item))
@@ -1144,6 +1385,7 @@ int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
+	maybe_disable_start_at_ms_for_movie_boot(item, 3, topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(3, item))
@@ -1155,6 +1397,7 @@ int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
+	maybe_disable_start_at_ms_for_movie_boot(item, 4, topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(4, item))
@@ -1166,6 +1409,7 @@ int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
+	maybe_disable_start_at_ms_for_movie_boot(item, 5, topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(5, item))
@@ -1177,6 +1421,7 @@ int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
+	maybe_disable_start_at_ms_for_movie_boot(item, 6, topitem);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(6, item))
@@ -1314,6 +1559,12 @@ int OnModuleStart(SceModule2 *mod)
 
 int module_start(SceSize args, void *argp)
 {
+	SceUID logfd;
+
+	logfd = sceIoOpen("ms0:/xmbih.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+	if (logfd >= 0)
+		sceIoClose(logfd);
+
 	xlog_raw_both("xmbih: module_start entry\n");
 	if (argp) {
 		xlog_raw_both("xmbih: argp=");
@@ -1355,10 +1606,15 @@ int module_start(SceSize args, void *argp)
 	set[57] = cfg(global_category, "MOVE_ARK_EXTRAS");
 	start_at_ms_flag = cfg(global_category, "START_AT_MEMORY_STICK");
 	if (start_at_ms_flag) {
-		boot_hide_for_ms = 1;
-		/* Game's displayed index = 5 minus any hidden pre-Game categories,
-		   so the XMB-ready signal matches regardless of what's hidden. */
-		start_ms_game_index = adjust_topitem_for_hidden_categories(5);
+		if (detect_boot_umd_video()) {
+			start_at_ms_flag = 0;
+			xlog("start_ms: disabled at boot for physical UMD movie\n");
+		} else {
+			boot_hide_for_ms = 1;
+			/* Game's displayed index = 5 minus any hidden pre-Game categories,
+			   so the XMB-ready signal matches regardless of what's hidden. */
+			start_ms_game_index = adjust_topitem_for_hidden_categories(5);
+		}
 	}
 
 	xlog_raw_both("cfg: settings 1\n");

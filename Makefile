@@ -21,7 +21,7 @@ LIBDIR = lib
 # (.MIPS.abiflags assigns itself an LMA that collides with .text).
 LDFLAGS = -nodefaultlibs -Wl,-T,discard.ld
 
-LIBS = -Llib -lpspsystemctrl_user -lpspkubridge -lpspvshctrl -lpspsystemctrl_kernel -lpspuser -lpspmodinfo -lgcc
+LIBS = -Llib -lpspsystemctrl_user -lpspkubridge -lpspvshctrl -lpspsystemctrl_kernel -lpspumd -lpspuser -lpspmodinfo -lgcc
 
 PSPSDK = $(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build_prx.mak
