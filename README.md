@@ -43,7 +43,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   - If you hide the `PlayStation®Network` category with `HIDE_ALL_PSN = 2`—but don't also hide `Network` with `HIDE_ALL_NETWORK = 2`—the first few icons in the `Network` category will be temporarily missing. To refresh them, scroll down the `Network` category then scroll back up.
 - You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in `xmbih.ini`—only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
   - Hiding `System Settings` with `SYSTEM = 1` or `HIDE_ALL_SETTINGS = 1` renders ARK menu items unresponsive.
-  - `Settings` *does* get hidden with `HIDE_ALL = 2`.
+  - The entire `Settings` category *does* get hidden with `HIDE_ALL = 2`.
 - Completely hiding any category to the left of the `Game` category can cause some bugs—see the table below for the full list.
   - Completely hiding the `Extras` category via the plugin adds additional bugs. If you want to hide `Extras`, there is already a safe CFW way to do so: Just change your `Custom Firmware Settings` > `VSH Region` to one of the following:
 <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
