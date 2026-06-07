@@ -142,7 +142,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><ins>After sleep+wake:</ins>
   <br>
     <ul>
-      <li><code>UMD™</code> & <code>PSP™ Update</code> duplicate when they are in the 2nd listed category</li>
+      <li><code>UMD™</code> & <code>PSP™ Update</code> duplicate if in the 2nd listed category</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>:
       <code>UMD™</code> & <code>PSP™ Update</code> duplicate</li>
     </ul>
@@ -154,7 +154,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><ins>After UMD eject+re-insert:</ins>
   <br>
     <ul>
-      <li><code>UMD™</code> & <code>PSP™ Update</code> duplicate when they are in the 2nd listed category</li>
+      <li><code>UMD™</code> & <code>PSP™ Update</code> duplicate if in the 2nd listed category</li>
       <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>:
       <code>UMD™</code> & <code>PSP™ Update</code> duplicate</li>
     </ul>
