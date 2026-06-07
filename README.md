@@ -84,7 +84,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td><i>(Non-PSP Go)</i> Ejecting/Removing <code>UMD™</code> doesn't fully remove <code>UMD™</code> from the XMB until VSH reset</td>
+  <td><i>(Non-PSP Go)</i> Ejecting/Removing <code>UMD™</code> doesn't fully remove <code>UMD™</code>'s entry from the XMB until VSH reset</td>
   <td>https://youtu.be/yhgnUOTe94M</td>
   <td><div align="center">➖</div></td>
 </tr>
