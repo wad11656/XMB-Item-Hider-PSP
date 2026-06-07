@@ -1,6 +1,6 @@
 # XMB Item Hider PSP
 
-XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). The biggest appeal is the ability to hide the largely unused **Network** and **PlayStation®Network** (PSN) categories.
+XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). The biggest appeal is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories.
 
 Continuation of Frostegater's project: https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP
 
@@ -17,29 +17,34 @@ Tested on:
 
 &nbsp;&nbsp;&nbsp;&nbsp;3b\. **Non-ARK CFW:** Add `ms0:/SEPLUGINS/xmbih.prx 1` _(non-PSP Go)_ or `ef0:/SEPLUGINS/xmbih.prx 1` _(PSP Go)_ to your `<StorageDevice>:/SEPLUGINS/VSH.txt`.<br>
 
-4\. Open the `.ini` file in a text editor and hide menu items by entering a `1` value, and completely hide Global XMB categories with a `2` value.<br>
+4\. Open `xmbih.ini` in a text editor and hide menu items by entering a `1` value, and completely hide Global XMB categories with a `2` value.<br>
 
 5\. Boot your PSP/Reset the VSH (XMB).
 
 ## Bonus Features
 
 #### <ins>Start XMB on Memory Stick:</ins>
-Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `xmbih.ini` to make the XMB boot with the cursor on **Memory Stick** in the `Game` category instead of `Saved Data Utility` / `Game Sharing`.
+Set `START_AT_MEMORY_STICK = 1` under `[Global]` in the `xmbih.ini` to make the XMB boot with the cursor on `Game` > `Memory Stick` instead of `Saved Data Utility` / `Game Sharing`.
 <br><img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/e25a053c-27b9-4be3-a5ac-837bf6f07c43" />
 
- - This setting **force-hides the "UMD Update" item** (the equivalent of setting `UMD_UPDATE = 1` in `xmbih.ini`) in order to prevent crashes.
+ - This setting **force-hides the UMD `PSP™ Update` item** (the equivalent of setting `UMD_UPDATE = 1` in `xmbih.ini`) in order to prevent crashes.
 #### <ins>Relocate ARK's "Extras" items:</ins>
 On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware Settings**, **Plugins Manager**, and **Custom Launcher**. Using flags under `[Global]` in `xmbih.ini`, you can relocate these items:
 
-- **`MOVE_ARK_EXTRAS = 1`** — Moves **Custom Launcher → `Game`**, and **Custom Firmware Settings & Plugins Manager → end of `Settings`** (with updated Settings-column icons)!<br><img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/1438e70e-cdcd-49c9-bf82-8bb1e8e2e983" />
-- **`HIDE_ALL_EXTRAS = 2`** — Mimics ARK CFW when the `Extras` category is absent: Hides `Extras` completely, and moves all three ARK items into `Game`.
-  - Introduces bugs, so Fake VSH Region should be used to hide `Extras` instead—see **Known Limitations** below.
+- **`MOVE_ARK_EXTRAS = 1`**:
+  - Moves `Custom Launcher` → `Game`
+  - Moves  `Custom Firmware Settings` & `Plugins Manager` → `Settings` (with updated icons)!
+  <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/1438e70e-cdcd-49c9-bf82-8bb1e8e2e983" />
+- **`HIDE_ALL_EXTRAS = 2`**: Mimics ARK CFW when the `Extras` category is absent — Hides `Extras` completely, and moves all 3 ARK items into `Game`.
+  - Introduces bugs, so a fake `VSH Region` should be used to hide `Extras` instead—see **Known Limitations** below.
 
 ## Known Limitations:
+- If you want to completely hide categories using the `2` flag in the `[Global]` section, you need to hide at least 2 categories, or else the XMB will crash.
+  - The safest solution is to just hide the `Network` and `PlayStation®Network` categories.
 - You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in the `xmbih.ini` file—only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
   - `Settings` *does* get hidden with `HIDE_ALL = 2`.
 - Completely hiding any category to the left of the `Game` category can cause buggy behavior with `Game` menu items. (i.e., Duplicated `Memory Stick` entries; Deleted `Resume Game` entries don't properly disappear until the next full VSH reset.)
-  - Completely hiding the `Extras` category via the plugin adds additional bugs. If you want to hide `Extras`, there is already a safe CFW way to do so: Just change your VSH region to one of the following in your CFW settings:
+  - Completely hiding the `Extras` category via the plugin adds additional bugs. If you want to hide `Extras`, there is already a safe CFW way to do so: Just change your `Custom Firmware Settings` > `VSH Region` to one of the following:
 <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
 <br><br><table>
 <tr>
@@ -54,13 +59,33 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <th><b>Status</b></th>
 </tr>
 <tr>
-  <td>Crash when inserting a UMD</td>
-  <td>https://youtu.be/UfljThsvCdk</td>
-  <td><a href="https://github.com/wad11656/XMB-Item-Hider-PSP/tree/Shift-UMD-entries">🔍 Investigating</a></td>
+  <td><s><code>Game Categories Lite</code> plugin doesn't work</s></td>
+  <td> </td>
+  <td align="center"><a href="https://github.com/wad11656/game-categories-lite/releases/latest">✅&nbsp;Solved - Use updated plugin</a></td>
 </tr>
 <tr>
-  <td><i>(Non-PSP Go)</i> Crash when waking from sleep</td>
+  <td><s><i>(Non-PSP Go)</i> Crash when inserting a UMD</s></td>
+  <td><s>https://youtu.be/UfljThsvCdk</s></td>
+  <td align="center">✅&nbsp;Solved</td>
+</tr>
+<tr>
+  <td>Missing <code>Network</code> category icons</td>
+  <td>https://youtu.be/KFEfO-UfcC0</td>
+  <td><div align="center">➖</div></td>
+</tr>
+<tr>
+  <td><i>(Non-PSP Go)</i> Crash when waking from sleep <i>UNLESS</i> <code>Video</code> is additionally one of the hidden categories</td>
   <td>https://youtu.be/cDNEmgeg8wE</td>
+  <td><div align="center">➖</div></td>
+</tr>
+<tr>
+  <td><i>(Non-PSP Go)</i> Blank UMD previews (static-image previews only) when <code>Game</code> is the 3rd listed category <i>OR</i> <code>PlayStation®Network</code> is not hidden</td>
+  <td>https://youtu.be/IgET1a6V7_E</td>
+  <td><div align="center">➖</div></td>
+</tr>
+<tr>
+  <td><i>(Non-PSP Go)</i> Ejecting/Removing <code>UMD™</code> doesn't apply until VSH reset</td>
+  <td>https://youtu.be/yhgnUOTe94M</td>
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
@@ -69,10 +94,10 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td colspan="3"><div align="center"><ins><code>Memory Stick</code> entries get duplicated</ins>
+  <td colspan="3"><div align="center"><ins>"Memory Stick" entries get duplicated</ins>
 </tr>
 <tr>
-  <td><i>(PSP Go)</i> <ins>After sleep+wake:</ins>
+  <td><ins>After sleep+wake:</ins>
   <br>
     <ul>
       <li><code>Game</code> > <code>Memory Stick</code> duplicates.</li>
@@ -108,6 +133,33 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
     </ul>
   </td>
   <td>https://youtu.be/dbXEe9qp_v0</td>
+  <td><div align="center">➖</div></td>
+</tr>
+<tr>
+  <td colspan="3"><div align="center"><ins>"UMD" entries get duplicated</ins>
+</tr>
+<tr>
+  <td><ins>After sleep+wake:</ins>
+  <br>
+    <ul>
+      <li><code>UMD™</code> & <code>PSP™ Update</code> duplicate when they are in the 2nd listed category</li>
+      <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>:
+      <code>UMD™</code> & <code>PSP™ Update</code> duplicate</li>
+    </ul>
+  </td>
+  <td>https://youtu.be/r8TsL0e9lPM</td>
+  <td><div align="center">➖</div></td>
+</tr>
+<tr>
+  <td><ins>After UMD eject+re-insert:</ins>
+  <br>
+    <ul>
+      <li><code>UMD™</code> & <code>PSP™ Update</code> duplicate when they are in the 2nd listed category</li>
+      <li>If <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code>:
+      <code>UMD™</code> & <code>PSP™ Update</code> duplicate</li>
+    </ul>
+  </td>
+  <td>https://youtu.be/tjQfxX1yVIw</td>
   <td><div align="center">➖</div></td>
 </tr>
 </table>
