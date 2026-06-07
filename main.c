@@ -31,6 +31,7 @@
 #include <pspsdk.h>
 #include <pspkernel.h>
 #include <pspiofilemgr.h>
+#include <psppower.h>
 #include <pspumd.h>
 #include <systemctrl.h>
 #include <systemctrl_se.h>
@@ -49,7 +50,12 @@ static struct {
 } cfg_store;
 
 #define set cfg_store.flags
+#ifndef XLOG_ENABLED
 #define XLOG_ENABLED 0
+#endif
+#ifndef POWER_DEBUGGING
+#define POWER_DEBUGGING 1
+#endif
 
 /*
  * Hand-rolled libc replacements. Linking against newlib's libc.a on a
@@ -455,6 +461,130 @@ static volatile int umd_captured = 0;
 static volatile void *game_a0 = 0;
 static volatile int game_topitem = 0;
 static volatile int game_ctx_captured = 0;
+static int top_category_hidden_count;
+static int top_category_count_logged;
+static u32 top_category_runtime_obj;
+static int top_category_runtime_return_override_logged;
+
+#if POWER_DEBUGGING
+static SceUID power_callback_uid = -1;
+static int power_callback_slot = -1;
+static SceUID power_callback_thread_uid = -1;
+#endif
+
+static void xlog_scene_state(const char *tag)
+{
+	u32 obj = 0;
+	u32 arr330 = 0;
+
+#if !XLOG_ENABLED
+	(void)tag;
+	return;
+#endif
+
+	if (scene_ctx)
+		obj = *(u32 *)(scene_ctx + 0xA6C);
+
+	if (obj)
+		arr330 = *(u32 *)(obj + 0x330);
+
+	xlog("scene[%s]: ctx=0x%08X obj=0x%08X hidden=%d boot_hide=%d start_ms=%d game_idx=%d captured=%d/%d/%d ark=%d\n",
+		tag, (u32)scene_ctx, obj, top_category_hidden_count, boot_hide_for_ms,
+		start_at_ms_flag, start_ms_game_index, gamedl_captured,
+		savedata_captured, umd_captured, captured_ark_count);
+
+	if (!obj)
+		return;
+
+	xlog("scene[%s]: 330=0x%08X 334=%d 338=%d 33C=%d 340=%d 344=%d 348=%d 34C=%d 350=%d 354=%d 358=%d 35C=%d\n",
+		tag, arr330, *(int *)(obj + 0x334), *(int *)(obj + 0x338),
+		*(int *)(obj + 0x33C), *(int *)(obj + 0x340), *(int *)(obj + 0x344),
+		*(int *)(obj + 0x348), *(int *)(obj + 0x34C), *(int *)(obj + 0x350),
+		*(int *)(obj + 0x354), *(int *)(obj + 0x358), *(int *)(obj + 0x35C));
+
+	if (arr330) {
+		xlog("scene[%s]: arr330[%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X]\n",
+			tag, *(u32 *)(arr330 + 0x00), *(u32 *)(arr330 + 0x04),
+			*(u32 *)(arr330 + 0x08), *(u32 *)(arr330 + 0x0C),
+			*(u32 *)(arr330 + 0x10), *(u32 *)(arr330 + 0x14),
+			*(u32 *)(arr330 + 0x18), *(u32 *)(arr330 + 0x1C));
+	}
+}
+
+#if POWER_DEBUGGING
+static int power_callback(int unknown, int powerInfo, void *arg)
+{
+	(void)arg;
+
+	xlog("power: cb unk=%d info=0x%08X\n", unknown, powerInfo);
+	if (powerInfo & PSP_POWER_CB_SUSPENDING)
+		xlog_scene_state("suspending");
+	if (powerInfo & PSP_POWER_CB_RESUMING)
+		xlog_scene_state("resuming");
+	if (powerInfo & PSP_POWER_CB_RESUME_COMPLETE)
+		xlog_scene_state("resume_complete");
+	if (powerInfo & PSP_POWER_CB_STANDBY)
+		xlog("power: standby flag set\n");
+	if (powerInfo & PSP_POWER_CB_POWER_SWITCH)
+		xlog("power: power-switch flag set\n");
+
+	return 0;
+}
+
+static int power_callback_thread(SceSize args, void *argp)
+{
+	int slot;
+
+	(void)args;
+	(void)argp;
+
+	power_callback_uid = sceKernelCreateCallback("xmbih_power", power_callback, NULL);
+	if (power_callback_uid < 0) {
+		xlog("power: sceKernelCreateCallback failed 0x%08X\n",
+			(unsigned int)power_callback_uid);
+		return 0;
+	}
+
+	slot = scePowerRegisterCallback(-1, power_callback_uid);
+	power_callback_slot = slot;
+	xlog("power: register callback uid=0x%08X slot=%d\n",
+		(unsigned int)power_callback_uid, slot);
+	if (slot < 0)
+		return 0;
+
+	while (1)
+		sceKernelSleepThreadCB();
+
+	return 0;
+}
+
+static void start_power_debugging(void)
+{
+	if (power_callback_thread_uid >= 0)
+		return;
+
+	power_callback_thread_uid = sceKernelCreateThread(
+		"xmbih_powercb",
+		power_callback_thread,
+		0x11,
+		0x1000,
+		0,
+		NULL);
+	if (power_callback_thread_uid < 0) {
+		xlog("power: sceKernelCreateThread failed 0x%08X\n",
+			(unsigned int)power_callback_thread_uid);
+		return;
+	}
+
+	sceKernelStartThread(power_callback_thread_uid, 0, NULL);
+	xlog("power: callback thread uid=0x%08X started\n",
+		(unsigned int)power_callback_thread_uid);
+}
+#else
+static void start_power_debugging(void)
+{
+}
+#endif
 
 static int path_is_dir(const char *path)
 {
@@ -639,11 +769,6 @@ static const char *top_category_names[8] = {
 	"msgtop_network",
 	"msg_psn"
 };
-
-static int top_category_hidden_count;
-static int top_category_count_logged;
-static u32 top_category_runtime_obj;
-static int top_category_runtime_return_override_logged;
 
 void ClearCaches()
 {
@@ -1675,6 +1800,7 @@ int module_start(SceSize args, void *argp)
 
 	xlog("xmbih: devkit=0x%X psp_model=%d\n", devkit, psp_model);
 	xlog_raw_both("ck5: post-first-xlog\n");
+	start_power_debugging();
 
 	xlog_raw_both("cfg: global 0\n");
 	/* Global */
@@ -1892,6 +2018,7 @@ int module_start(SceSize args, void *argp)
 	xlog_raw_both("ck8: post-sctrlHENSetStartModuleHandler\n");
 
 	xlog("module_start done; handler installed\n");
+	xlog_scene_state("module_start_done");
 
 	return 0;
 }

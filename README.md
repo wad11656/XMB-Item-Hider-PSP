@@ -36,7 +36,8 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   - Moves  `Custom Firmware Settings` & `Plugins Manager` → `Settings` (with updated icons)!
   <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/1438e70e-cdcd-49c9-bf82-8bb1e8e2e983" />
 - **`HIDE_ALL_EXTRAS = 2`**: Mimics ARK CFW when the `Extras` category is absent — Hides `Extras` completely, and moves all 3 ARK items into `Game`.
-  - Introduces bugs, so a fake `VSH Region` should be used to hide `Extras` instead—see **Known Limitations** below.
+  - Introduces bugs, so one of the following fake `VSH Region`s should be used to hide `Extras` instead (see **Known Limitations** below for details):
+  <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
 
 ## Known Bugs/Limitations:
 - `PlayStation®Network` is the only category that can be safely hidden **on its own** using the `2` flag in `xmbih.ini`'s `[Global]` section (`HIDE_ALL_PSN = 2`). If you use the `2` flag to hide any other category, you must also hide at least 1 additional `[Global]` category using the `2` flag, or else the XMB will crash.
@@ -68,12 +69,12 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
 <tr>
   <td><i>(Non-PSP Go)</i> Crash when inserting a UMD</td>
   <td>https://youtu.be/UfljThsvCdk</td>
-  <td align="center">✅&nbsp;Solved</td>
+  <td align="center">🟡&nbsp;Partially solved: XMB may crash during boot w/ UMD inserted</td>
 </tr>
 <tr>
   <td>Crash when waking from sleep <i>UNLESS</i> <code>Video</code> is one of the hidden categories</td>
   <td>https://youtu.be/cDNEmgeg8wE</td>
-  <td><div align="center">➖</div></td>
+  <td align="center">✅&nbsp;Solved</td>
 </tr>
 <tr>
   <td>Permanently missing <code>Network</code> category icons (if <code>Network</code> isn't hidden)</td>
@@ -86,8 +87,11 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td><i>(Non-PSP Go)</i> Blank UMD previews (static-image previews only) when <code>Game</code> is the 3rd listed category <i>OR</i> when <code>PlayStation®Network</code> is not hidden</td>
-  <td>https://youtu.be/IgET1a6V7_E</td>
+  <td><i>(Non-PSP Go)</i> If <code>Network</code> & <code>PlayStation®Network</code> aren't both also hidden OR <code>Game</code> is the 3rd listed category: Blank UMD preview icons <in> (static-image preview icons only)
+  <ul><li>+ Blank bg if <code>HIDE_ALL_EXTRAS = 2</code> in <code>xmbih.ini</code></li></ul>
+</td>
+  <td><ul><li>https://youtu.be/IgET1a6V7_E (Blank icon)</li>
+  <li>https://youtu.be/xTUn423SjPM (Blank icon + bg)</li></ul></td>
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
