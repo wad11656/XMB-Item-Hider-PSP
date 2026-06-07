@@ -60,13 +60,13 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <th><b>Status</b></th>
 </tr>
 <tr>
-  <td><s><code>Game Categories Lite</code> plugin doesn't work</s></td>
+  <td><code>Game Categories Lite</code> plugin doesn't work</td>
   <td> </td>
   <td align="center"><a href="https://github.com/wad11656/game-categories-lite/releases/latest">✅&nbsp;Solved - Use updated plugin</a></td>
 </tr>
 <tr>
-  <td><s><i>(Non-PSP Go)</i> Crash when inserting a UMD</s></td>
-  <td><s>https://youtu.be/UfljThsvCdk</s></td>
+  <td><i>(Non-PSP Go)</i> Crash when inserting a UMD</td>
+  <td>https://youtu.be/UfljThsvCdk</td>
   <td align="center">✅&nbsp;Solved</td>
 </tr>
 <tr>
