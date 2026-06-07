@@ -38,12 +38,12 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
 - **`HIDE_ALL_EXTRAS = 2`**: Mimics ARK CFW when the `Extras` category is absent — Hides `Extras` completely, and moves all 3 ARK items into `Game`.
   - Introduces bugs, so a fake `VSH Region` should be used to hide `Extras` instead—see **Known Limitations** below.
 
-## Known Limitations:
-- If you want to completely hide categories using the `2` flag in the `[Global]` section, you need to hide **at least 2 categories**, or else the XMB will crash.
-  - The safest solution is to just hide the `Network` and `PlayStation®Network` categories.
+## Known Bugs/Limitations:
+- If you set `HIDE_ALL_NETWORK = 2` in `xmbih.ini`'s `[Global]` section to completely hide the `Network` category, you must also set `HIDE_ALL_PSN = 2` to completely hide the `PlayStation®Network` category, or else the XMB will crash.
+- If you set `HIDE_ALL_PSN = 2` in  `xmbih.ini`'s `[Global]` section—without also setting `HIDE_ALL_NETWORK = 2`—then the first few icons in the `Network` category will be temporarily missing until you refresh them by scrolling down the `Network` category then scrolling back up.
 - You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in the `xmbih.ini` file—only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
   - `Settings` *does* get hidden with `HIDE_ALL = 2`.
-- Completely hiding any category to the left of the `Game` category can cause buggy behavior with `Game` menu items. (i.e., Duplicated `Memory Stick` entries; Deleted `Resume Game` entries don't properly disappear until the next full VSH reset.)
+- Completely hiding any category to the left of the `Game` category can cause buggy behavior with `Game` menu items—See the table below for the full list.
   - Completely hiding the `Extras` category via the plugin adds additional bugs. If you want to hide `Extras`, there is already a safe CFW way to do so: Just change your `Custom Firmware Settings` > `VSH Region` to one of the following:
 <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
 <br><br><table>
@@ -69,7 +69,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td align="center">✅&nbsp;Solved</td>
 </tr>
 <tr>
-  <td>Missing <code>Network</code> category icons</td>
+  <td>Permanently missing <code>Network</code> category icons (if <code>Network</code> isn't hidden)</td>
   <td>https://youtu.be/KFEfO-UfcC0</td>
   <td><div align="center">➖</div></td>
 </tr>
