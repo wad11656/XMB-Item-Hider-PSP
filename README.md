@@ -85,7 +85,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td><i>(Non-PSP Go)</i> Blank UMD previews (static-image previews only) when <code>Game</code> is the 3rd listed category <i>OR</i> <code>PlayStation®Network</code> is not hidden</td>
+  <td><i>(Non-PSP Go)</i> Blank UMD previews (static-image previews only) when <code>Game</code> is the 3rd listed category <i>OR</i> when <code>PlayStation®Network</code> is not hidden</td>
   <td>https://youtu.be/IgET1a6V7_E</td>
   <td><div align="center">➖</div></td>
 </tr>
