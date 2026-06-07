@@ -1,6 +1,6 @@
 # XMB Item Hider PSP
 
-_Continuation of Frostegater's project: https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP_
+_Continuation of Frostegater's project: <a href="https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP" target="_blank">https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP</a>_
 
 XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). The biggest appeal is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories. _**(Hiding any other categories beyond those 2 is experimental—see below for the full bug list.)**_
 
