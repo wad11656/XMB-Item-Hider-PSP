@@ -2,7 +2,7 @@
 
 _Continuation of Frostegater's project: https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP_
 
-XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). The biggest appeal is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories. (Hiding any other categories beyond those 2 is experimental—see below for the full bug list.)
+XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). The biggest appeal is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories. _**(Hiding any other categories beyond those 2 is experimental—see below for the full bug list.)**_
 
 Tested on:
 - 6.61 ARK-4
@@ -41,7 +41,8 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
 ## Known Bugs/Limitations:
 - `PlayStation®Network` is the only category that can be safely hidden **on its own** using the `2` flag in `xmbih.ini`'s `[Global]` section (`HIDE_ALL_PSN = 2`). If you use the `2` flag to hide any other category, you must also hide at least 1 additional `[Global]` category using the `2` flag, or else the XMB will crash.
   - If you hide the `PlayStation®Network` category with `HIDE_ALL_PSN = 2`—but don't also hide `Network` with `HIDE_ALL_NETWORK = 2`—the first few icons in the `Network` category will be temporarily missing. To refresh them, scroll down the `Network` category then scroll back up.
-- You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in the `xmbih.ini` file—only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
+- You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in `xmbih.ini`—only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
+  - Hiding `System Settings` with `SYSTEM = 1` or `HIDE_ALL_SETTINGS = 1` renders ARK menu items unresponsive.
   - `Settings` *does* get hidden with `HIDE_ALL = 2`.
 - Completely hiding any category to the left of the `Game` category can cause some bugs—see the table below for the full list.
   - Completely hiding the `Extras` category via the plugin adds additional bugs. If you want to hide `Extras`, there is already a safe CFW way to do so: Just change your `Custom Firmware Settings` > `VSH Region` to one of the following:
