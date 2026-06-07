@@ -81,7 +81,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td><i>(Non-PSP Go)</i> Crash when waking from sleep <i>UNLESS</i> <code>Video</code> is one of the hidden categories</td>
+  <td>Crash when waking from sleep <i>UNLESS</i> <code>Video</code> is one of the hidden categories</td>
   <td>https://youtu.be/cDNEmgeg8wE</td>
   <td><div align="center">➖</div></td>
 </tr>
