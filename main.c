@@ -341,6 +341,9 @@ int skip(SceVshItem *item, int location);  /* forward decl, defined further down
 static int is_ark_custom_item(const char *text);
 static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
 	int *out_topitem, const char *source);
+static int (*TopcatSelectShiftedFunc)(void *ctx, int adjusted_topitem,
+	int original_topitem);
+static int (*TopcatPositionFunc)(void *obj, int topitem);
 
 /* Used by AddVshItemFilter below (START_AT_MEMORY_STICK), but the rest of the
    feature's state is defined further down. */
@@ -1430,6 +1433,49 @@ int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
 	return 0;
 }
 
+/* The trimmed top-category wrappers above do not cover vshmain's dedicated UMD
+   preview add/select helpers, so when categories left of Game are hidden with
+   mode 2 those paths still use the original untrimmed indices. Patch the 6.60
+   UMD-specific callsites too so physical Game/Movie UMD entries shift left in
+   lock-step with the visible top-category layout. */
+static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
+{
+	xlog("umd video add top=%d adj=%d\n", topitem,
+		adjust_topitem_for_hidden_categories(topitem));
+	return AddVshItem(a0, adjust_topitem_for_hidden_categories(topitem), item);
+}
+
+static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
+{
+	xlog("umd game add top=%d adj=%d\n", topitem,
+		adjust_topitem_for_hidden_categories(topitem));
+	return AddVshItem(a0, adjust_topitem_for_hidden_categories(topitem), item);
+}
+
+static int UmdVideoSelectShiftPatched(void *ctx, int topitem)
+{
+	xlog("umd video select top=%d adj=%d\n", topitem,
+		adjust_topitem_for_hidden_categories(topitem));
+	return TopcatSelectShiftedFunc(ctx,
+		adjust_topitem_for_hidden_categories(topitem), topitem);
+}
+
+static int UmdGameSelectShiftPatched(void *ctx, int topitem)
+{
+	xlog("umd game select top=%d adj=%d\n", topitem,
+		adjust_topitem_for_hidden_categories(topitem));
+	return TopcatSelectShiftedFunc(ctx,
+		adjust_topitem_for_hidden_categories(topitem), topitem);
+}
+
+static int UmdTopcatPositionShiftPatched(void *obj, int topitem)
+{
+	int adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
+
+	xlog("umd pos orig=%d adj=%d\n", topitem, adjusted_topitem);
+	return TopcatPositionFunc(obj, adjusted_topitem);
+}
+
 void PatchVshMain(u32 text_addr)
 {
 	/* Capture whatever the patch[1] JAL currently points at -- the real
@@ -1480,6 +1526,35 @@ void PatchVshMain(u32 text_addr)
 			topcat_count_patch, text_addr + topcat_count_patch,
 			*(u32 *)(text_addr + topcat_count_patch),
 			*(u32 *)(text_addr + topcat_count_patch + 4));
+	}
+
+	if (devkit == FW(0x660)) {
+		TopcatSelectShiftedFunc = (int (*)(void *, int, int))(text_addr + 0x22998);
+		TopcatPositionFunc = (int (*)(void *, int))(text_addr + 0x3F4E0);
+		MAKE_CALL(text_addr + 0x22C7C, UmdVideoAddPatchedRet);
+		MAKE_CALL(text_addr + 0x22C8C, UmdVideoSelectShiftPatched);
+		MAKE_CALL(text_addr + 0x22CDC, UmdVideoAddPatchedRet);
+		MAKE_CALL(text_addr + 0x22CEC, UmdVideoSelectShiftPatched);
+		MAKE_CALL(text_addr + 0x22D5C, UmdGameAddPatchedRet);
+		MAKE_CALL(text_addr + 0x22DA4, UmdGameSelectShiftPatched);
+		MAKE_CALL(text_addr + 0x22EC0, UmdGameAddPatchedRet);
+		MAKE_CALL(text_addr + 0x22ED0, UmdGameSelectShiftPatched);
+		MAKE_CALL(text_addr + 0x22DF0, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x22E0C, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x22E28, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x22E60, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x22F28, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x22F44, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x22F60, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x22F98, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x23028, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x23048, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x23064, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x230A0, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x23138, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x23154, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x23170, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x231A8, UmdTopcatPositionShiftPatched);
 	}
 
 	/* Photo Memory Stick */
