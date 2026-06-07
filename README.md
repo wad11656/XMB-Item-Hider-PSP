@@ -39,7 +39,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   - Introduces bugs, so a fake `VSH Region` should be used to hide `Extras` instead—see **Known Limitations** below.
 
 ## Known Limitations:
-- If you want to completely hide categories using the `2` flag in the `[Global]` section, you need to hide at least 2 categories, or else the XMB will crash.
+- If you want to completely hide categories using the `2` flag in the `[Global]` section, you need to hide **at least 2 categories**, or else the XMB will crash.
   - The safest solution is to just hide the `Network` and `PlayStation®Network` categories.
 - You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in the `xmbih.ini` file—only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
   - `Settings` *does* get hidden with `HIDE_ALL = 2`.
