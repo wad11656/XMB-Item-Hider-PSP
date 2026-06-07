@@ -71,6 +71,11 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td align="center">✅&nbsp;Solved</td>
 </tr>
 <tr>
+  <td>Crash when waking from sleep <i>UNLESS</i> <code>Video</code> is one of the hidden categories</td>
+  <td>https://youtu.be/cDNEmgeg8wE</td>
+  <td><div align="center">➖</div></td>
+</tr>
+<tr>
   <td>Permanently missing <code>Network</code> category icons (if <code>Network</code> isn't hidden)</td>
   <td>https://youtu.be/KFEfO-UfcC0</td>
   <td><div align="center">➖</div></td>
@@ -78,11 +83,6 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
 <tr>
   <td>If <code>Network</code> & <code>PlayStation®Network</code> aren't both also hidden, the XMB will boot into one of those categories—to the right of <code>Game</code></td>
   <td>https://youtu.be/HOvTVaQ09Kg</td>
-  <td><div align="center">➖</div></td>
-</tr>
-<tr>
-  <td>Crash when waking from sleep <i>UNLESS</i> <code>Video</code> is one of the hidden categories</td>
-  <td>https://youtu.be/cDNEmgeg8wE</td>
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
