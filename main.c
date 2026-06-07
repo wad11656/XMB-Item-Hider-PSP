@@ -49,6 +49,7 @@ static struct {
 } cfg_store;
 
 #define set cfg_store.flags
+#define XLOG_ENABLED 0
 
 /*
  * Hand-rolled libc replacements. Linking against newlib's libc.a on a
@@ -152,6 +153,11 @@ long strtol(const char *s, char **end, int base)
 static void xlog_raw_both(const char *msg)
 {
 	SceUID fd;
+
+#if !XLOG_ENABLED
+	(void)msg;
+	return;
+#endif
 
 	fd = sceIoOpen("ms0:/xmbih.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
 	if (fd < 0)
@@ -1636,9 +1642,13 @@ int module_start(SceSize args, void *argp)
 {
 	SceUID logfd;
 
+#if XLOG_ENABLED
 	logfd = sceIoOpen("ms0:/xmbih.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
 	if (logfd >= 0)
 		sceIoClose(logfd);
+#else
+	(void)logfd;
+#endif
 
 	xlog_raw_both("xmbih: module_start entry\n");
 	if (argp) {
