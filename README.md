@@ -76,7 +76,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td>If <code>Network</code> & <code>PlayStation®Network</code> aren't both also hidden, the XMB will boot onto one of those categories—to the right of <code>Game</code></td>
+  <td>If <code>Network</code> & <code>PlayStation®Network</code> aren't both also hidden, the XMB will boot into one of those categories—to the right of <code>Game</code></td>
   <td>https://youtu.be/HOvTVaQ09Kg</td>
   <td><div align="center">➖</div></td>
 </tr>
