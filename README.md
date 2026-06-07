@@ -44,6 +44,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
 - You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in `xmbih.ini`—only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
   - Hiding `System Settings` with `SYSTEM = 1` or `HIDE_ALL_SETTINGS = 1` renders ARK menu items unresponsive.
   - The entire `Settings` category *does* get hidden with `HIDE_ALL = 2`.
+    - This setting completely hides all XMB categories and is strictly experimental!
 - Completely hiding any category to the left of the `Game` category can cause some bugs—see the table below for the full list.
   - Completely hiding the `Extras` category via the plugin introduces additional bugs. If you want to hide `Extras`, there is already a safe CFW way to do so: Just change your `Custom Firmware Settings` > `VSH Region` to one of the following:
 <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
