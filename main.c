@@ -53,8 +53,11 @@ static struct {
 #ifndef XLOG_ENABLED
 #define XLOG_ENABLED 0
 #endif
+/* The power callback only emits xlog tracing, so it's useless once logging is
+   off -- yet it still spawns a thread and consumes a system power-callback
+   slot. Tie it to XLOG_ENABLED so release builds don't carry that dead weight. */
 #ifndef POWER_DEBUGGING
-#define POWER_DEBUGGING 1
+#define POWER_DEBUGGING XLOG_ENABLED
 #endif
 
 /*
@@ -1571,32 +1574,34 @@ int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
    lock-step with the visible top-category layout. */
 static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 {
-	xlog("umd video add top=%d adj=%d\n", topitem,
-		adjust_topitem_for_hidden_categories(topitem));
-	return AddVshItem(a0, adjust_topitem_for_hidden_categories(topitem), item);
+	int adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
+
+	xlog("umd video add top=%d adj=%d\n", topitem, adjusted_topitem);
+	return AddVshItem(a0, adjusted_topitem, item);
 }
 
 static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 {
-	xlog("umd game add top=%d adj=%d\n", topitem,
-		adjust_topitem_for_hidden_categories(topitem));
-	return AddVshItem(a0, adjust_topitem_for_hidden_categories(topitem), item);
+	int adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
+
+	xlog("umd game add top=%d adj=%d\n", topitem, adjusted_topitem);
+	return AddVshItem(a0, adjusted_topitem, item);
 }
 
 static int UmdVideoSelectShiftPatched(void *ctx, int topitem)
 {
-	xlog("umd video select top=%d adj=%d\n", topitem,
-		adjust_topitem_for_hidden_categories(topitem));
-	return TopcatSelectShiftedFunc(ctx,
-		adjust_topitem_for_hidden_categories(topitem), topitem);
+	int adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
+
+	xlog("umd video select top=%d adj=%d\n", topitem, adjusted_topitem);
+	return TopcatSelectShiftedFunc(ctx, adjusted_topitem, topitem);
 }
 
 static int UmdGameSelectShiftPatched(void *ctx, int topitem)
 {
-	xlog("umd game select top=%d adj=%d\n", topitem,
-		adjust_topitem_for_hidden_categories(topitem));
-	return TopcatSelectShiftedFunc(ctx,
-		adjust_topitem_for_hidden_categories(topitem), topitem);
+	int adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
+
+	xlog("umd game select top=%d adj=%d\n", topitem, adjusted_topitem);
+	return TopcatSelectShiftedFunc(ctx, adjusted_topitem, topitem);
 }
 
 static int UmdTopcatPositionShiftPatched(void *obj, int topitem)
