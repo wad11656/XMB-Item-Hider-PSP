@@ -2,7 +2,7 @@
 
 <i>Continuation of Frostegater's project: <a href="https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP" target="_blank">https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP</a></i>
 
-XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). The biggest appeal is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories. _**(Hiding any other categories beyond those 2 is experimental—see below for the full bug list.)**_
+XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). The biggest appeal is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories. _**(Hiding any other categories beyond those 2 introduces bugs, but is mostly stable — see below for the full bug list.)**_
 
 Tested on:
 - 6.61 ARK-4
@@ -40,13 +40,14 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
 
 ## Known Bugs/Limitations:
-- `PlayStation®Network` is the only category that can be safely hidden **on its own** using the `2` flag in `xmbih.ini`'s `[Global]` section (`HIDE_ALL_PSN = 2`). If you use the `2` flag to hide any other category, you must also hide at least 1 additional `[Global]` category using the `2` flag, or else the XMB will crash.
+- `PlayStation®Network` is the only category that can be safely hidden **on its own** using the `2` flag in `xmbih.ini`'s `[Global]` section (`HIDE_ALL_PSN = 2`). 
+  - If you use the `2` flag to hide any other `[Global]` category, you must also hide at least 1 additional category, or else the XMB will crash.
   - If you hide the `PlayStation®Network` category with `HIDE_ALL_PSN = 2`—but don't also hide `Network` with `HIDE_ALL_NETWORK = 2`—the first few icons in the `Network` category will be temporarily missing. To refresh them, scroll down the `Network` category then scroll back up.
-- You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in `xmbih.ini`—only its contents (`HIDE_ALL_SETTINGS = 1`). (The `Settings` category seems to act as the "anchor" for the rest of the categories.)
+- You can't completely hide the leftmost `Settings` category with `HIDE_ALL_SETTINGS = 2` in `xmbih.ini` — only its contents (`HIDE_ALL_SETTINGS = 1`). (`Settings` acts as an anchor for the rest of the categories.)
   - Hiding `System Settings` with `SYSTEM = 1` or `HIDE_ALL_SETTINGS = 1` renders ARK menu items unresponsive.
   - The entire `Settings` category *does* get hidden with `HIDE_ALL = 2`.
     - This setting completely hides all XMB categories and is strictly experimental!
-- Completely hiding any category to the left of the `Game` category can cause some bugs—see the table below for the full list.
+- Completely hiding any category to the left of the `Game` category can cause some bugs — see the table below for the full list.
   - Completely hiding the `Extras` category via the plugin introduces additional bugs. If you want to hide `Extras`, there is already a safe CFW way to do so: Just change your `Custom Firmware Settings` > `VSH Region` to one of the following:
 <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
 <br><br><table>
@@ -64,12 +65,12 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
 <tr>
   <td><code>Game Categories Lite</code> plugin doesn't work</td>
   <td> </td>
-  <td align="center"><a href="https://github.com/wad11656/game-categories-lite/releases/latest">✅&nbsp;Solved - Use updated plugin</a></td>
+  <td align="center"><a href="https://github.com/wad11656/game-categories-lite/releases/latest">✅&nbsp;Solved — Use updated plugin</a></td>
 </tr>
 <tr>
   <td><i>(Non-PSP Go)</i> Crash when inserting a UMD</td>
   <td>https://youtu.be/UfljThsvCdk</td>
-  <td align="center">🟡&nbsp;Partially solved: XMB may crash during boot w/ UMD inserted</td>
+  <td align="center">🟡&nbsp;Mostly solved — XMB may crash during boot w/ UMD inserted</td>
 </tr>
 <tr>
   <td>Crash when waking from sleep <i>UNLESS</i> <code>Video</code> is one of the hidden categories</td>
@@ -82,7 +83,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td>If <code>Network</code> & <code>PlayStation®Network</code> aren't both also hidden, the XMB will boot into one of those categories—to the right of <code>Game</code></td>
+  <td>If <code>Network</code> & <code>PlayStation®Network</code> aren't both also hidden, the XMB will boot into one of those categories — to the right of <code>Game</code></td>
   <td>https://youtu.be/HOvTVaQ09Kg</td>
   <td><div align="center">➖</div></td>
 </tr>
