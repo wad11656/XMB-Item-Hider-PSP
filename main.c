@@ -353,6 +353,7 @@ static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
 static int (*TopcatSelectShiftedFunc)(void *ctx, int adjusted_topitem,
 	int original_topitem);
 static int (*TopcatPositionFunc)(void *obj, int topitem);
+static int hide_top_category(int index);
 
 /* Used by AddVshItemFilter below (START_AT_MEMORY_STICK), but the rest of the
    feature's state is defined further down. */
@@ -458,6 +459,11 @@ static volatile int umd_captured = 0;
 static volatile void *game_a0 = 0;
 static volatile int game_topitem = 0;
 static volatile int game_ctx_captured = 0;
+static volatile void *boot_umd_a0 = 0;
+static volatile int boot_umd_topitem = 0;
+static volatile int boot_umd_defer_active = 0;
+static volatile int boot_umd_defer_captured = 0;
+static volatile int boot_umd_defer_thread_started = 0;
 static int top_category_hidden_count;
 static int top_category_count_logged;
 static u32 top_category_runtime_obj;
@@ -572,6 +578,76 @@ static void start_power_debugging(void)
 	sceKernelStartThread(power_callback_thread_uid, 0, NULL);
 	xlog("power: callback thread uid=0x%08X started\n",
 		(unsigned int)power_callback_thread_uid);
+}
+
+static int should_defer_boot_umd_add(void)
+{
+	if (start_at_ms_flag)
+		return 0;
+
+	if (hide_top_category(4))
+		return 0;
+
+	return hide_top_category(1) ||
+	       hide_top_category(2) ||
+	       hide_top_category(3);
+}
+
+static int boot_umd_readd_thread(SceSize args, void *argp)
+{
+	int i;
+
+	(void)args;
+	(void)argp;
+
+	/* Narrow experiment: only delay the initial boot/VSH-reset UMD add while
+	   the compacted top-category layout settles, then replay the exact item
+	   through the normal AddVshItem path. */
+	for (i = 0; i < 40; i++) {
+		u32 obj = 0;
+
+		if (scene_ctx)
+			obj = *(u32 *)(scene_ctx + 0xA6C);
+		if (obj && *(int *)(obj + 0x334) > 0)
+			break;
+
+		sceKernelDelayThread(25000);
+	}
+
+	sceKernelDelayThread(500000);
+
+	boot_umd_defer_active = 0;
+	if (boot_umd_defer_captured && boot_umd_a0)
+		AddVshItem((void *)boot_umd_a0, boot_umd_topitem, &captured_umd);
+
+	return 0;
+}
+
+static int maybe_defer_boot_umd_add(void *a0, int topitem, SceVshItem *item)
+{
+	SceUID tid;
+
+	if (!boot_umd_defer_active || boot_umd_defer_captured)
+		return 0;
+
+	if (strcmp(item->text, "msgshare_umd"))
+		return 0;
+
+	memcpy(&captured_umd, item, sizeof(SceVshItem));
+	boot_umd_a0 = a0;
+	boot_umd_topitem = topitem;
+	boot_umd_defer_captured = 1;
+	xlog("boot_umd: deferred initial add top=%d\n", topitem);
+
+	if (!boot_umd_defer_thread_started) {
+		boot_umd_defer_thread_started = 1;
+		tid = sceKernelCreateThread("xmbih_boot_umd",
+			boot_umd_readd_thread, 0x18, 0x1000, 0, NULL);
+		if (tid >= 0)
+			sceKernelStartThread(tid, 0, NULL);
+	}
+
+	return 1;
 }
 
 static int path_is_dir(const char *path)
@@ -1559,6 +1635,9 @@ int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
    lock-step with the visible top-category layout. */
 static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 {
+	if (maybe_defer_boot_umd_add(a0, adjust_topitem_for_hidden_categories(topitem), item))
+		return 0;
+
 	xlog("umd video add top=%d adj=%d\n", topitem,
 		adjust_topitem_for_hidden_categories(topitem));
 	return AddVshItem(a0, adjust_topitem_for_hidden_categories(topitem), item);
@@ -1566,6 +1645,9 @@ static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 
 static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 {
+	if (maybe_defer_boot_umd_add(a0, adjust_topitem_for_hidden_categories(topitem), item))
+		return 0;
+
 	xlog("umd game add top=%d adj=%d\n", topitem,
 		adjust_topitem_for_hidden_categories(topitem));
 	return AddVshItem(a0, adjust_topitem_for_hidden_categories(topitem), item);
@@ -1815,6 +1897,13 @@ int module_start(SceSize args, void *argp)
 			start_ms_game_index = adjust_topitem_for_hidden_categories(5);
 		}
 	}
+	boot_umd_defer_active = should_defer_boot_umd_add() && sceUmdCheckMedium() > 0;
+	boot_umd_defer_captured = 0;
+	boot_umd_defer_thread_started = 0;
+	boot_umd_a0 = 0;
+	boot_umd_topitem = 0;
+	if (boot_umd_defer_active)
+		xlog("boot_umd: defer active\n");
 
 	xlog_raw_both("cfg: settings 1\n");
 	/* Settings */
