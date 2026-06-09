@@ -2,7 +2,9 @@ TARGET = xmbih
 OBJS = main.o minIni.o
 
 MININI_DEFINES = -DNDEBUG -DINI_READONLY -DINI_FILETYPE=SceUID -DPORTABLE_STRNICMP -DINI_NOFLOAT
-CFLAGS = -Os -G0 -Wall -std=gnu99 -fshort-wchar -fno-pic -mno-check-zero-division $(MININI_DEFINES) -DKPRINTF_ENABLED -DCONFIG_6xx=1
+XLOG_ENABLED ?= 0
+
+CFLAGS = -Os -G0 -Wall -std=gnu99 -fshort-wchar -fno-pic -mno-check-zero-division $(MININI_DEFINES) -DKPRINTF_ENABLED -DCONFIG_6xx=1 -DXLOG_ENABLED=$(XLOG_ENABLED)
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 ASFLAGS = $(CFLAGS)
 
@@ -21,7 +23,7 @@ LIBDIR = lib
 # (.MIPS.abiflags assigns itself an LMA that collides with .text).
 LDFLAGS = -nodefaultlibs -Wl,-T,discard.ld
 
-LIBS = -Llib -lpspsystemctrl_user -lpspkubridge -lpspvshctrl -lpspsystemctrl_kernel -lpspumd -lpsppower -lpspuser -lpspmodinfo -lgcc
+LIBS = -Llib -lpspsystemctrl_user -lpspkubridge -lpspvshctrl -lpspsystemctrl_kernel -lpspumd -lpsppower -lpspusb -lpspuser -lpspmodinfo -lgcc
 
 PSPSDK = $(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build_prx.mak
@@ -34,3 +36,7 @@ all: install-release
 install-release: $(TARGET).prx
 	@mkdir -p release
 	cp -f $(TARGET).prx release/$(TARGET).prx
+
+.PHONY: logbuild
+logbuild:
+	$(MAKE) -B XLOG_ENABLED=1

@@ -31,7 +31,9 @@
 #include <pspsdk.h>
 #include <pspkernel.h>
 #include <pspiofilemgr.h>
+#include <pspmscm.h>
 #include <psppower.h>
+#include <pspusb.h>
 #include <pspumd.h>
 #include <systemctrl.h>
 #include <systemctrl_se.h>
@@ -471,6 +473,10 @@ static int top_category_runtime_return_override_logged;
 static SceUID power_callback_uid = -1;
 static int power_callback_slot = -1;
 static SceUID power_callback_thread_uid = -1;
+static SceUID umd_callback_uid = -1;
+static SceUID ms_callback_uid = -1;
+static volatile int suppress_next_game_ms_add = 0;
+static volatile u32 suppress_umd_adds_until = 0;
 
 static void xlog_scene_state(const char *tag)
 {
@@ -511,6 +517,85 @@ static void xlog_scene_state(const char *tag)
 	}
 }
 
+static int media_duplicate_risk_active(void)
+{
+	if (!scene_ctx)
+		return 0;
+
+	if (hide_top_category(4))
+		return 0;
+
+	return hide_top_category(1) ||
+	       hide_top_category(2) ||
+	       hide_top_category(3);
+}
+
+static void arm_media_readd_suppression(volatile u32 *until, u32 duration_us, const char *tag)
+{
+	if (!media_duplicate_risk_active())
+		return;
+
+	*until = sceKernelGetSystemTimeLow() + duration_us;
+	xlog("%s: suppress window %u us\n", tag, duration_us);
+}
+
+static void arm_game_ms_readd_suppression(const char *tag)
+{
+	if (!media_duplicate_risk_active() || !scene_ctx)
+		return;
+
+	suppress_next_game_ms_add = 1;
+	xlog("%s: suppress next game ms add\n", tag);
+}
+
+static int maybe_suppress_media_readd(SceVshItem *item, int location, int topitem)
+{
+	volatile u32 *until = NULL;
+	u32 now;
+	int should_suppress = 0;
+
+	if (!strcmp(item->text, "msgshare_ms")) {
+		if (topitem != adjust_topitem_for_hidden_categories(5) ||
+		    !suppress_next_game_ms_add)
+			return 0;
+
+		suppress_next_game_ms_add = 0;
+		xlog("media suppress: text='%s' loc=%d top=%d\n",
+			item->text, location, topitem);
+		return 1;
+	}
+	else if (!strcmp(item->text, "msgshare_umd")) {
+		until = &suppress_umd_adds_until;
+		should_suppress = topitem == 1;
+	}
+	else {
+		return 0;
+	}
+
+	now = sceKernelGetSystemTimeLow();
+	if (!*until || (int)(*until - now) <= 0 || !should_suppress)
+		return 0;
+
+	*until = 0;
+	xlog("media suppress: text='%s' loc=%d top=%d\n",
+		item->text, location, topitem);
+	return 1;
+}
+
+static void log_msgshare_ms_add(const char *source, int location, int topitem)
+{
+	xlog("%s msgshare_ms: loc=%d top=%d game_top=%d video_hidden=%d ms_inserted=%d usb=0x%X suppress_next=%d now=%u\n",
+		source,
+		location,
+		topitem,
+		adjust_topitem_for_hidden_categories(5),
+		hide_top_category(4),
+		MScmIsMediumInserted(),
+		sceUsbGetState(),
+		suppress_next_game_ms_add,
+		sceKernelGetSystemTimeLow());
+}
+
 static int power_callback(int unknown, int powerInfo, void *arg)
 {
 	(void)arg;
@@ -526,6 +611,41 @@ static int power_callback(int unknown, int powerInfo, void *arg)
 		xlog("power: standby flag set\n");
 	if (powerInfo & PSP_POWER_CB_POWER_SWITCH)
 		xlog("power: power-switch flag set\n");
+	if (powerInfo & (PSP_POWER_CB_RESUMING | PSP_POWER_CB_RESUME_COMPLETE)) {
+		arm_game_ms_readd_suppression("power ms");
+		arm_media_readd_suppression(&suppress_umd_adds_until, 3000000, "power umd");
+	}
+
+	return 0;
+}
+
+static int umd_callback(int unknown, int event, void *arg)
+{
+	(void)unknown;
+	(void)arg;
+
+	xlog("umd cb: event=0x%08X\n", event);
+	if (event & (PSP_UMD_NOT_PRESENT | PSP_UMD_CHANGED))
+		arm_media_readd_suppression(&suppress_umd_adds_until, 3000000, "umd");
+
+	return 0;
+}
+
+static int ms_callback(int unknown, int event, void *arg)
+{
+	(void)unknown;
+	(void)arg;
+
+	xlog("ms cb: event=%d inserted=%d usb=0x%X suppress_next=%d now=%u\n",
+		event,
+		MScmIsMediumInserted(),
+		sceUsbGetState(),
+		suppress_next_game_ms_add,
+		sceKernelGetSystemTimeLow());
+	if (event == MS_CB_EVENT_EJECTED)
+		arm_game_ms_readd_suppression("ms eject");
+	else if (event == MS_CB_EVENT_INSERTED)
+		arm_game_ms_readd_suppression("ms insert");
 
 	return 0;
 }
@@ -550,6 +670,14 @@ static int power_callback_thread(SceSize args, void *argp)
 		(unsigned int)power_callback_uid, slot);
 	if (slot < 0)
 		return 0;
+
+	umd_callback_uid = sceKernelCreateCallback("xmbih_umd", umd_callback, NULL);
+	if (umd_callback_uid >= 0)
+		sceUmdRegisterUMDCallBack(umd_callback_uid);
+
+	ms_callback_uid = sceKernelCreateCallback("xmbih_ms", ms_callback, NULL);
+	if (ms_callback_uid >= 0)
+		MScmRegisterMSInsertEjectCallback(ms_callback_uid);
 
 	while (1)
 		sceKernelSleepThreadCB();
@@ -1560,6 +1688,10 @@ int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 1, topitem);
+	if (!strcmp(item->text, "msgshare_ms"))
+		log_msgshare_ms_add("photo", 1, topitem);
+	if (maybe_suppress_media_readd(item, 1, topitem))
+		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(1, item))
@@ -1572,6 +1704,10 @@ int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 2, topitem);
+	if (!strcmp(item->text, "msgshare_ms"))
+		log_msgshare_ms_add("music", 2, topitem);
+	if (maybe_suppress_media_readd(item, 2, topitem))
+		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(2, item))
@@ -1584,6 +1720,10 @@ int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 3, topitem);
+	if (!strcmp(item->text, "msgshare_ms"))
+		log_msgshare_ms_add("video", 3, topitem);
+	if (maybe_suppress_media_readd(item, 3, topitem))
+		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(3, item))
@@ -1596,6 +1736,11 @@ int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 4, topitem);
+	if (!strcmp(item->text, "msgshare_ms")) {
+		log_msgshare_ms_add("game", 4, topitem);
+	}
+	if (maybe_suppress_media_readd(item, 4, topitem))
+		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(4, item))
@@ -1608,6 +1753,8 @@ int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 5, topitem);
+	if (maybe_suppress_media_readd(item, 5, topitem))
+		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(5, item))
@@ -1620,6 +1767,8 @@ int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
 {
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 6, topitem);
+	if (maybe_suppress_media_readd(item, 6, topitem))
+		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(6, item))
@@ -1635,22 +1784,28 @@ int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
    lock-step with the visible top-category layout. */
 static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 {
-	if (maybe_defer_boot_umd_add(a0, adjust_topitem_for_hidden_categories(topitem), item))
+	int adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
+
+	if (maybe_defer_boot_umd_add(a0, adjusted_topitem, item))
+		return 0;
+	if (maybe_suppress_media_readd(item, 3, adjusted_topitem))
 		return 0;
 
-	xlog("umd video add top=%d adj=%d\n", topitem,
-		adjust_topitem_for_hidden_categories(topitem));
-	return AddVshItem(a0, adjust_topitem_for_hidden_categories(topitem), item);
+	xlog("umd video add top=%d adj=%d\n", topitem, adjusted_topitem);
+	return AddVshItem(a0, adjusted_topitem, item);
 }
 
 static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 {
-	if (maybe_defer_boot_umd_add(a0, adjust_topitem_for_hidden_categories(topitem), item))
+	int adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
+
+	if (maybe_defer_boot_umd_add(a0, adjusted_topitem, item))
+		return 0;
+	if (maybe_suppress_media_readd(item, 4, adjusted_topitem))
 		return 0;
 
-	xlog("umd game add top=%d adj=%d\n", topitem,
-		adjust_topitem_for_hidden_categories(topitem));
-	return AddVshItem(a0, adjust_topitem_for_hidden_categories(topitem), item);
+	xlog("umd game add top=%d adj=%d\n", topitem, adjusted_topitem);
+	return AddVshItem(a0, adjusted_topitem, item);
 }
 
 static int UmdVideoSelectShiftPatched(void *ctx, int topitem)
