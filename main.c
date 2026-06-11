@@ -473,10 +473,13 @@ static int top_category_runtime_return_override_logged;
 static SceUID power_callback_uid = -1;
 static int power_callback_slot = -1;
 static SceUID power_callback_thread_uid = -1;
+static SceUID media_watch_thread_uid = -1;
 static SceUID umd_callback_uid = -1;
 static SceUID ms_callback_uid = -1;
 static volatile int suppress_next_game_ms_add = 0;
 static volatile u32 suppress_umd_adds_until = 0;
+static volatile int last_ms_inserted_state = -2;
+static volatile int last_usb_state = -1;
 
 static void xlog_scene_state(const char *tag)
 {
@@ -522,12 +525,10 @@ static int media_duplicate_risk_active(void)
 	if (!scene_ctx)
 		return 0;
 
-	if (hide_top_category(4))
-		return 0;
-
 	return hide_top_category(1) ||
 	       hide_top_category(2) ||
-	       hide_top_category(3);
+	       hide_top_category(3) ||
+	       hide_top_category(4);
 }
 
 static void arm_media_readd_suppression(volatile u32 *until, u32 duration_us, const char *tag)
@@ -555,7 +556,8 @@ static int maybe_suppress_media_readd(SceVshItem *item, int location, int topite
 	int should_suppress = 0;
 
 	if (!strcmp(item->text, "msgshare_ms")) {
-		if (topitem != adjust_topitem_for_hidden_categories(5) ||
+		if (location != 4 ||
+		    topitem != adjust_topitem_for_hidden_categories(5) ||
 		    !suppress_next_game_ms_add)
 			return 0;
 
@@ -642,10 +644,50 @@ static int ms_callback(int unknown, int event, void *arg)
 		sceUsbGetState(),
 		suppress_next_game_ms_add,
 		sceKernelGetSystemTimeLow());
-	if (event == MS_CB_EVENT_EJECTED)
+	if (event == MS_CB_EVENT_EJECTED) {
 		arm_game_ms_readd_suppression("ms eject");
+	}
 	else if (event == MS_CB_EVENT_INSERTED)
 		arm_game_ms_readd_suppression("ms insert");
+
+	return 0;
+}
+
+static int media_watch_thread(SceSize args, void *argp)
+{
+	(void)args;
+	(void)argp;
+
+	while (1) {
+		int inserted = MScmIsMediumInserted();
+		int usb_state = sceUsbGetState();
+		int usb_drop = (last_usb_state != 0x221 && usb_state == 0x221);
+		int usb_rise = (last_usb_state == 0x221 && usb_state != 0x221);
+
+		if (inserted != last_ms_inserted_state || usb_state != last_usb_state) {
+			xlog("ms poll: inserted=%d usb=0x%X prev_inserted=%d prev_usb=0x%X\n",
+				inserted, usb_state, last_ms_inserted_state, last_usb_state);
+		}
+
+		if (last_ms_inserted_state >= -1 && inserted != last_ms_inserted_state) {
+			if (inserted <= 0) {
+				arm_game_ms_readd_suppression("ms poll eject");
+			}
+			else {
+				arm_game_ms_readd_suppression("ms poll insert");
+			}
+		}
+		else if (scene_ctx && inserted > 0 && usb_drop) {
+			arm_game_ms_readd_suppression("ms usb drop");
+		}
+		else if (scene_ctx && inserted > 0 && usb_rise) {
+			arm_game_ms_readd_suppression("ms usb rise");
+		}
+
+		last_ms_inserted_state = inserted;
+		last_usb_state = usb_state;
+		sceKernelDelayThreadCB(200000);
+	}
 
 	return 0;
 }
@@ -706,6 +748,26 @@ static void start_power_debugging(void)
 	sceKernelStartThread(power_callback_thread_uid, 0, NULL);
 	xlog("power: callback thread uid=0x%08X started\n",
 		(unsigned int)power_callback_thread_uid);
+
+	if (media_watch_thread_uid >= 0)
+		return;
+
+	media_watch_thread_uid = sceKernelCreateThread(
+		"xmbih_mediawatch",
+		media_watch_thread,
+		0x10,
+		0x1000,
+		0,
+		NULL);
+	if (media_watch_thread_uid < 0) {
+		xlog("media: sceKernelCreateThread failed 0x%08X\n",
+			(unsigned int)media_watch_thread_uid);
+		return;
+	}
+
+	sceKernelStartThread(media_watch_thread_uid, 0, NULL);
+	xlog("media: watcher thread uid=0x%08X started\n",
+		(unsigned int)media_watch_thread_uid);
 }
 
 static int should_defer_boot_umd_add(void)
