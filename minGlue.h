@@ -23,6 +23,10 @@
 /* map required file I/O to the standard C library */
 #include <pspiofilemgr.h>
 
+#if !defined(INI_READONLY)
+#error "xmbih must be built with INI_READONLY; writing xmbih.ini is unsupported"
+#endif
+
 #define ini_openread(filename,file)   ((*(file) = sceIoOpen((filename),PSP_O_RDONLY, 0777)) >= 0)
 #define ini_openwrite(filename,file)  ((*(file) = fopen((filename),"wt")) != NULL)
 #define ini_close(file)               sceIoClose(*(file))

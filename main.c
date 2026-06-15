@@ -477,9 +477,17 @@ static SceUID media_watch_thread_uid = -1;
 static SceUID umd_callback_uid = -1;
 static SceUID ms_callback_uid = -1;
 static volatile int suppress_next_game_ms_add = 0;
+static volatile int suppress_next_leading_ms_add = 0;
+static volatile int seen_leading_video_umd = 0;
+static volatile int suppress_next_game_umd_adds = 0;
+static volatile int seen_game_umd_items = 0;
 static volatile u32 suppress_umd_adds_until = 0;
 static volatile int last_ms_inserted_state = -2;
 static volatile int last_usb_state = -1;
+
+static int path_is_dir(const char *path);
+static int current_umd_is_video(void);
+static int preferred_umd_location(const char *text);
 
 static void xlog_scene_state(const char *tag)
 {
@@ -549,6 +557,180 @@ static void arm_game_ms_readd_suppression(const char *tag)
 	xlog("%s: suppress next game ms add\n", tag);
 }
 
+static int first_visible_media_location_after_settings(void)
+{
+	if (!hide_top_category(1))
+		return 0;
+	if (!hide_top_category(2))
+		return 1;
+	if (!hide_top_category(3))
+		return 2;
+	if (!hide_top_category(4))
+		return 3;
+
+	return 4;
+}
+
+/* Display index (adjusted topitem) of the first visible top category to the
+   right of Settings, DISREGARDING Extras. The compaction only ever desyncs
+   vshmain's native UMD dedup for this leftmost media column, so it is the only
+   column whose UMD adds we suppress. Photo(2)/Music(3)/Video(4) are checked in
+   order; if all are hidden the first media column is Game(5). Extras(1) is
+   skipped because a UMD never lands there. */
+static int first_visible_media_topitem(void)
+{
+	int native = 5;                          /* Game, if Photo/Music/Video hidden */
+
+	if (!hide_top_category(2))
+		native = 2;                      /* Photo */
+	else if (!hide_top_category(3))
+		native = 3;                      /* Music */
+	else if (!hide_top_category(4))
+		native = 4;                      /* Video */
+
+	return adjust_topitem_for_hidden_categories(native);
+}
+
+static int leading_ms_duplicate_risk_active(void)
+{
+	int location;
+
+	if (!scene_ctx || !hide_top_category(1))
+		return 0;
+
+	location = first_visible_media_location_after_settings();
+	return location >= 1 && location <= 3;
+}
+
+static void arm_leading_ms_readd_suppression(const char *tag)
+{
+	int location;
+
+	if (!leading_ms_duplicate_risk_active())
+		return;
+
+	location = first_visible_media_location_after_settings();
+	suppress_next_leading_ms_add = location;
+	xlog("%s: suppress next leading ms add loc=%d\n", tag, location);
+}
+
+static int leading_umd_duplicate_risk_active(void)
+{
+	return hide_top_category(1) &&
+	       first_visible_media_location_after_settings() == 3;
+}
+
+static int should_suppress_umd_select_route(int topitem)
+{
+	int preferred = preferred_umd_location("msgshare_umd");
+
+	if (preferred == 3)
+		return leading_umd_duplicate_risk_active() && topitem == 5;
+
+	if (preferred == 4)
+		return hide_top_category(4) && topitem == 4;
+
+	return 0;
+}
+
+static void reset_leading_umd_seen(const char *tag)
+{
+	if (!seen_leading_video_umd)
+		return;
+
+	xlog("%s: clear seen leading video umd=%d\n", tag, seen_leading_video_umd);
+	seen_leading_video_umd = 0;
+}
+
+static int is_game_umd_duplicate_item(const char *text)
+{
+	return !strcmp(text, "msgshare_umd") ||
+	       !strcmp(text, "msg_system_update") ||
+	       !strcmp(text, "msgtop_sysconf_update");
+}
+
+static int game_umd_item_mask(const char *text, int location)
+{
+	int base = 0;
+
+	if (!strcmp(text, "msgshare_umd"))
+		base = 1;
+	else if (!strcmp(text, "msg_system_update") ||
+		 !strcmp(text, "msgtop_sysconf_update"))
+		base = 4;
+
+	if (!base)
+		return 0;
+
+	return location == 3 ? base : (base << 1);
+}
+
+static int preferred_umd_location(const char *text)
+{
+	if (strcmp(text, "msgshare_umd"))
+		return 4;
+
+	/* Route by disc type. A movie's ONLY add path is the Video/Movie one --
+	   vshmain issues no Game add for a movie -- so even when the Video column
+	   is hidden the movie must stay on the Video path (preferred 3). When Video
+	   is hidden, adjust(4) (Video) and adjust(5) (Game) resolve to the same
+	   compacted index, so allowing that video-add lands the movie in Game (it
+	   "collapses" in). Returning 4 here -- as a blanket "Video hidden => Game"
+	   rule did -- instead suppressed the movie's only add path (loc 3 != 4) and
+	   the entry vanished entirely. A game disc uses the Game path (4). */
+	switch (current_umd_is_video()) {
+	case 1:
+		return 3;
+	case 0:
+		return 4;
+	default:
+		/* Disc type momentarily unavailable (drive spinning up). When Video is
+		   hidden, fall back to the Game route so a single path is still chosen. */
+		return hide_top_category(4) ? 4 : 0;
+	}
+}
+
+static int current_umd_is_video(void)
+{
+	pspUmdInfo info;
+
+	if (sceUmdCheckMedium() <= 0)
+		return -1;
+
+	memset(&info, 0, sizeof(info));
+	info.size = sizeof(info);
+
+	if (sceUmdGetDiscInfo(&info) >= 0)
+		return (info.type & PSP_UMD_TYPE_VIDEO) != 0;
+
+	if (path_is_dir("disc0:/UMD_VIDEO"))
+		return 1;
+	if (path_is_dir("disc0:/PSP_GAME"))
+		return 0;
+
+	return 0;
+}
+
+static void reset_game_umd_seen(const char *tag)
+{
+	if (!seen_game_umd_items)
+		return;
+
+	xlog("%s: clear seen game umd mask=0x%X\n", tag, seen_game_umd_items);
+	seen_game_umd_items = 0;
+}
+
+static void arm_game_umd_readd_suppression(const char *tag, int count)
+{
+	if (!media_duplicate_risk_active() || !scene_ctx || count <= 0)
+		return;
+
+	if (suppress_next_game_umd_adds < count)
+		suppress_next_game_umd_adds = count;
+	xlog("%s: suppress next game umd adds=%d\n", tag,
+		suppress_next_game_umd_adds);
+}
+
 static int maybe_suppress_media_readd(SceVshItem *item, int location, int topitem)
 {
 	volatile u32 *until = NULL;
@@ -556,6 +738,14 @@ static int maybe_suppress_media_readd(SceVshItem *item, int location, int topite
 	int should_suppress = 0;
 
 	if (!strcmp(item->text, "msgshare_ms")) {
+		if (location == suppress_next_leading_ms_add &&
+		    location >= 1 && location <= 3 &&
+		    topitem == adjust_topitem_for_hidden_categories(location + 1)) {
+			suppress_next_leading_ms_add = 0;
+			xlog("media suppress: text='%s' loc=%d top=%d leading=1\n",
+				item->text, location, topitem);
+			return 1;
+		}
 		if (location != 4 ||
 		    topitem != adjust_topitem_for_hidden_categories(5) ||
 		    !suppress_next_game_ms_add)
@@ -566,7 +756,54 @@ static int maybe_suppress_media_readd(SceVshItem *item, int location, int topite
 			item->text, location, topitem);
 		return 1;
 	}
-	else if (!strcmp(item->text, "msgshare_umd")) {
+	if (is_game_umd_duplicate_item(item->text)) {
+		if (!strcmp(item->text, "msgshare_umd") &&
+		    location == 3 &&
+		    topitem == adjust_topitem_for_hidden_categories(4) &&
+		    leading_umd_duplicate_risk_active() &&
+		    preferred_umd_location(item->text) == 3) {
+			if (seen_leading_video_umd) {
+				xlog("media suppress: text='%s' loc=%d top=%d leading_umd=1\n",
+					item->text, location, topitem);
+				return 1;
+			}
+			seen_leading_video_umd = 1;
+			xlog("media allow: text='%s' loc=%d top=%d leading_umd=1\n",
+				item->text, location, topitem);
+		}
+		if ((location == 3 || location == 4) &&
+		    (topitem == first_visible_media_topitem() ||
+		     (hide_top_category(4) &&
+		      topitem == adjust_topitem_for_hidden_categories(5)))) {
+			int preferred_location = preferred_umd_location(item->text);
+			int mask = game_umd_item_mask(item->text, location);
+
+			if (preferred_location && location != preferred_location) {
+				xlog("media suppress: text='%s' loc=%d top=%d preferred=%d seen_umd=0x%X\n",
+					item->text, location, topitem, preferred_location,
+					seen_game_umd_items);
+				return 1;
+			}
+
+			if (mask && (seen_game_umd_items & mask)) {
+				xlog("media suppress: text='%s' loc=%d top=%d seen_umd=0x%X\n",
+					item->text, location, topitem, seen_game_umd_items);
+				return 1;
+			}
+			if (!mask && suppress_next_game_umd_adds > 0) {
+				suppress_next_game_umd_adds--;
+				xlog("media suppress: text='%s' loc=%d top=%d remaining_umd=%d\n",
+					item->text, location, topitem, suppress_next_game_umd_adds);
+				return 1;
+			}
+			if (mask) {
+				seen_game_umd_items |= mask;
+				xlog("media allow: text='%s' loc=%d top=%d seen_umd=0x%X\n",
+					item->text, location, topitem, seen_game_umd_items);
+			}
+		}
+	}
+	if (!strcmp(item->text, "msgshare_umd")) {
 		until = &suppress_umd_adds_until;
 		should_suppress = topitem == 1;
 	}
@@ -582,6 +819,32 @@ static int maybe_suppress_media_readd(SceVshItem *item, int location, int topite
 	xlog("media suppress: text='%s' loc=%d top=%d\n",
 		item->text, location, topitem);
 	return 1;
+}
+
+static void mark_boot_umd_replay_seen(int topitem)
+{
+	/* Only the first visible media column (right of Settings, skipping Extras)
+	   is deduped, so the replay only needs to mark that column as seen -- both
+	   the Video-path (bit 1) and Game-path (bit 2) bits, so any later walk add
+	   landing there is suppressed. */
+	if (topitem != first_visible_media_topitem())
+		return;
+
+	seen_game_umd_items |= game_umd_item_mask("msgshare_umd", 3) |
+	                       game_umd_item_mask("msgshare_umd", 4);
+	xlog("boot_umd: mark seen umd top=%d mask=0x%X\n",
+		topitem, seen_game_umd_items);
+}
+
+/* The boot replay re-adds the captured UMD via AddVshItem directly, which
+   bypasses maybe_suppress_media_readd(). If the normal boot walk already added
+   the deduped first-media-column entry (its per-column seen-bit is set),
+   replaying would duplicate it. */
+static int boot_umd_already_present(void)
+{
+	return (seen_game_umd_items &
+	        (game_umd_item_mask("msgshare_umd", 3) |
+	         game_umd_item_mask("msgshare_umd", 4))) != 0;
 }
 
 static void log_msgshare_ms_add(const char *source, int location, int topitem)
@@ -614,8 +877,20 @@ static int power_callback(int unknown, int powerInfo, void *arg)
 	if (powerInfo & PSP_POWER_CB_POWER_SWITCH)
 		xlog("power: power-switch flag set\n");
 	if (powerInfo & (PSP_POWER_CB_RESUMING | PSP_POWER_CB_RESUME_COMPLETE)) {
+		/* Do NOT reset_game_umd_seen() on resume. A sleep/wake keeps the
+		   existing UMD entry in its column (the disc never changed), but vshmain
+		   re-walks the add path on resume. Clearing the seen-mask let those
+		   re-adds through, duplicating the entry that survived the sleep. Leave
+		   the mask set so maybe_suppress_media_readd() swallows the resume
+		   re-walk -- the same way the Memory Stick path relies on
+		   suppress_next_game_ms_add persisting across resume. A genuine disc
+		   change still clears the mask via reset_game_umd_seen() in
+		   umd_callback(). */
+		arm_leading_ms_readd_suppression("power lead ms");
 		arm_game_ms_readd_suppression("power ms");
 		arm_media_readd_suppression(&suppress_umd_adds_until, 3000000, "power umd");
+		if (sceUmdCheckMedium() > 0)
+			arm_game_umd_readd_suppression("power game umd", 2);
 	}
 
 	return 0;
@@ -627,8 +902,12 @@ static int umd_callback(int unknown, int event, void *arg)
 	(void)arg;
 
 	xlog("umd cb: event=0x%08X\n", event);
-	if (event & (PSP_UMD_NOT_PRESENT | PSP_UMD_CHANGED))
+	if (event & (PSP_UMD_NOT_PRESENT | PSP_UMD_CHANGED)) {
+		reset_leading_umd_seen("umd lead");
+		reset_game_umd_seen("umd game");
 		arm_media_readd_suppression(&suppress_umd_adds_until, 3000000, "umd");
+		arm_game_umd_readd_suppression("umd game", 2);
+	}
 
 	return 0;
 }
@@ -645,10 +924,13 @@ static int ms_callback(int unknown, int event, void *arg)
 		suppress_next_game_ms_add,
 		sceKernelGetSystemTimeLow());
 	if (event == MS_CB_EVENT_EJECTED) {
+		arm_leading_ms_readd_suppression("ms eject lead");
 		arm_game_ms_readd_suppression("ms eject");
 	}
-	else if (event == MS_CB_EVENT_INSERTED)
+	else if (event == MS_CB_EVENT_INSERTED) {
+		arm_leading_ms_readd_suppression("ms insert lead");
 		arm_game_ms_readd_suppression("ms insert");
+	}
 
 	return 0;
 }
@@ -663,7 +945,6 @@ static int media_watch_thread(SceSize args, void *argp)
 		int usb_state = sceUsbGetState();
 		int usb_drop = (last_usb_state != 0x221 && usb_state == 0x221);
 		int usb_rise = (last_usb_state == 0x221 && usb_state != 0x221);
-
 		if (inserted != last_ms_inserted_state || usb_state != last_usb_state) {
 			xlog("ms poll: inserted=%d usb=0x%X prev_inserted=%d prev_usb=0x%X\n",
 				inserted, usb_state, last_ms_inserted_state, last_usb_state);
@@ -671,16 +952,20 @@ static int media_watch_thread(SceSize args, void *argp)
 
 		if (last_ms_inserted_state >= -1 && inserted != last_ms_inserted_state) {
 			if (inserted <= 0) {
+				arm_leading_ms_readd_suppression("ms poll eject lead");
 				arm_game_ms_readd_suppression("ms poll eject");
 			}
 			else {
+				arm_leading_ms_readd_suppression("ms poll insert lead");
 				arm_game_ms_readd_suppression("ms poll insert");
 			}
 		}
 		else if (scene_ctx && inserted > 0 && usb_drop) {
+			arm_leading_ms_readd_suppression("ms usb drop lead");
 			arm_game_ms_readd_suppression("ms usb drop");
 		}
 		else if (scene_ctx && inserted > 0 && usb_rise) {
+			arm_leading_ms_readd_suppression("ms usb rise lead");
 			arm_game_ms_readd_suppression("ms usb rise");
 		}
 
@@ -807,8 +1092,15 @@ static int boot_umd_readd_thread(SceSize args, void *argp)
 	sceKernelDelayThread(500000);
 
 	boot_umd_defer_active = 0;
-	if (boot_umd_defer_captured && boot_umd_a0)
-		AddVshItem((void *)boot_umd_a0, boot_umd_topitem, &captured_umd);
+	if (boot_umd_defer_captured && boot_umd_a0) {
+		if (boot_umd_already_present()) {
+			xlog("boot_umd: replay skipped, already present top=%d\n",
+				boot_umd_topitem);
+		} else {
+			mark_boot_umd_replay_seen(boot_umd_topitem);
+			AddVshItem((void *)boot_umd_a0, boot_umd_topitem, &captured_umd);
+		}
+	}
 
 	return 0;
 }
@@ -1075,8 +1367,8 @@ static XmbTopCategory *find_top_category_table(u32 text_addr)
 
 /*
  * Extras/ARK handling:
- *   HIDE_ALL_EXTRAS = 2 hides the Extras top category and relocates ARK's
- *   injected CFW items to Game (wad's behavior).
+ *   HIDE_ALL_EXTRAS = 2 is clamped to 1 by the plugin. Fully removing the
+ *   Extras top category is only supported through the safe fake-region path.
  *
  *   MOVE_ARK_EXTRAS = 1 reuses the old split-routing logic, but does NOT hide
  *   Extras or its non-ARK items: Custom Firmware Settings + Plugins Manager go
@@ -1140,12 +1432,12 @@ static int move_extra_items_mode(void)
 	return set[57];
 }
 
-/* Extras column is gone this boot -- either =2's count-patch hides it, or the
-   active fake VSH region does. MOVE_ARK_EXTRAS does not hide it; it only
-   changes where ARK's own injected items land. */
+/* Extras column is gone this boot only when the active fake VSH region hides
+   it. MOVE_ARK_EXTRAS does not hide it; it only changes where ARK's own
+   injected items land. */
 static int extras_is_hidden(void)
 {
-	return set[1] == 2 || extras_hidden_by_region();
+	return extras_hidden_by_region();
 }
 
 static int top_category_requested_hidden(int index)
@@ -1168,10 +1460,10 @@ static int top_category_requested_hidden(int index)
 
 	switch (index) {
 		case 1:
-			/* Only =2 hides the Extras column via the count-patch (and only
-			   when a fake region isn't already hiding it). MOVE_ARK_EXTRAS
-			   never count-patches: it only relocates ARK's own items. */
-			return (set[1] == 2) && !extras_hidden_by_region();
+			/* The plugin no longer hides the Extras top category via
+			   HIDE_ALL_EXTRAS=2. Use a fake VSH region if the whole column
+			   should disappear. */
+			return 0;
 		case 2:
 			return set[2] == 2;
 		case 3:
@@ -1853,7 +2145,8 @@ static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 	if (maybe_suppress_media_readd(item, 3, adjusted_topitem))
 		return 0;
 
-	xlog("umd video add top=%d adj=%d\n", topitem, adjusted_topitem);
+	xlog("umd video add text='%s' top=%d adj=%d\n",
+		item->text, topitem, adjusted_topitem);
 	return AddVshItem(a0, adjusted_topitem, item);
 }
 
@@ -1866,7 +2159,8 @@ static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 	if (maybe_suppress_media_readd(item, 4, adjusted_topitem))
 		return 0;
 
-	xlog("umd game add top=%d adj=%d\n", topitem, adjusted_topitem);
+	xlog("umd game add text='%s' top=%d adj=%d\n",
+		item->text, topitem, adjusted_topitem);
 	return AddVshItem(a0, adjusted_topitem, item);
 }
 
@@ -1880,6 +2174,11 @@ static int UmdVideoSelectShiftPatched(void *ctx, int topitem)
 
 static int UmdGameSelectShiftPatched(void *ctx, int topitem)
 {
+	if (should_suppress_umd_select_route(topitem)) {
+		xlog("umd game select suppressed top=%d adj=%d\n", topitem,
+			adjust_topitem_for_hidden_categories(topitem));
+		return 0;
+	}
 	xlog("umd game select top=%d adj=%d\n", topitem,
 		adjust_topitem_for_hidden_categories(topitem));
 	return TopcatSelectShiftedFunc(ctx,
@@ -2093,6 +2392,10 @@ int module_start(SceSize args, void *argp)
 	/* Global */
 	set[0] = cfg(global_category, "HIDE_ALL_SETTINGS");
 	set[1] = cfg(global_category, "HIDE_ALL_EXTRAS");
+	if (set[1] == 2) {
+		set[1] = 1;
+		xlog("topcat: HIDE_ALL_EXTRAS=2 not supported; forcing content-only hide\n");
+	}
 	set[2] = cfg(global_category, "HIDE_ALL_PHOTO");
 	set[3] = cfg(global_category, "HIDE_ALL_MUSIC");
 	set[4] = cfg(global_category, "HIDE_ALL_GAME");
