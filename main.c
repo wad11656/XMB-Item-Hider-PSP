@@ -2474,10 +2474,10 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 {
 #if XLOG_ENABLED
 	int loaded;
-	u32 off = (u32)entry - (u32)atlas;
 	u32 key;
 	int i, dup = 0;
 #endif
+	u32 off = (u32)entry - (u32)atlas;
 	u32 entry_addr = (u32)entry;
 	void *record = 0;
 	u32 mod;
