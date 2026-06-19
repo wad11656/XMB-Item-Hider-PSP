@@ -36,7 +36,19 @@ all: install-release
 install-release: $(TARGET).prx
 	@mkdir -p release
 	cp -f $(TARGET).prx release/$(TARGET).prx
+	@mkdir -p release/normal
+	cp -f $(TARGET).prx release/normal/$(TARGET).prx
 
 .PHONY: logbuild
 logbuild:
 	$(MAKE) -B XLOG_ENABLED=1
+	@mkdir -p release
+	cp -f $(TARGET).prx release/$(TARGET)-log.prx
+	@mkdir -p release/log
+	cp -f $(TARGET).prx release/log/$(TARGET).prx
+
+.PHONY: bothbuild
+bothbuild:
+	$(MAKE) -B
+	$(MAKE) logbuild
+	$(MAKE) -B

@@ -347,7 +347,6 @@ static int xmbctrl_triggered = 0;
    this on v1.3fix2-derived code), the only consequence is that one
    trigger item still shows; the rest of the code still works. */
 static u32 add_vsh_trampoline[4] __attribute__((section(".data"), aligned(4))) = { 0, 0, 0, 0 };
-
 int skip(SceVshItem *item, int location);  /* forward decl, defined further down */
 static int is_ark_custom_item(const char *text);
 static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
@@ -355,10 +354,36 @@ static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
 static int (*TopcatSelectShiftedFunc)(void *ctx, int adjusted_topitem,
 	int original_topitem);
 static int (*TopcatPositionFunc)(void *obj, int topitem);
+static int (*TrackColumnIconKey)(void *atlas, int topitem, const char *icon_key);
+static int (*NetworkDispatchFunc)(void *ctx, int a1, int a2, int a3);
+static int (*ResolveIconKeyHelper)(const char *icon_key, int *out0, int *out1,
+	int *out2);
+static int (*IconGetTex)(void *buf, void *atlas, void *entry);
+static int (*EnsureIconEntryFunc)(void *ctx, void *entry);
+static int (*FinalizeIconEntryFunc)(void *ctx, void *entry, int topitem, int slot);
 static int hide_top_category(int index);
+static volatile u32 vsh_text_addr = 0;
+static volatile u32 vsh_seg1_addr = 0;
+static volatile u32 vsh_seg1_size = 0;
+static volatile u32 icon_layout_atlas = 0;
+static volatile int icon_layout_main_mod = -1;
+static volatile int icon_layout_shadow_mod = -1;
+static volatile int icon_layout_glow_mod = -1;
+
+#if XLOG_ENABLED
+static volatile int network_track_probe_count;
+static volatile int network_resolve_probe_active;
+static const char *network_resolve_probe_key;
+static volatile int network_dispatch_probe_count;
+static volatile int network_dispatch_state_probe_count;
+static volatile int network_visible_prime_probe_count;
+static volatile u32 icon_layout_prev2_off;
+static volatile u32 icon_layout_prev1_off;
+#endif
 
 /* Used by AddVshItemFilter below (START_AT_MEMORY_STICK), but the rest of the
    feature's state is defined further down. */
+static int count_hidden_top_categories_before(int topitem);  /* defined below */
 static int adjust_topitem_for_hidden_categories(int topitem);  /* defined below */
 static volatile int boot_hide_for_ms = 0;
 static SceVshItem captured_ark[5];
@@ -859,6 +884,146 @@ static void log_msgshare_ms_add(const char *source, int location, int topitem)
 		sceUsbGetState(),
 		suppress_next_game_ms_add,
 		sceKernelGetSystemTimeLow());
+}
+
+static int is_network_item_text(const char *text)
+{
+	return !strcmp(text, "msg_onlinemanual") ||
+	       !strcmp(text, "msgtop_network_lftv") ||
+	       !strcmp(text, "msg_skype") ||
+	       !strcmp(text, "msg_ps3_connection") ||
+	       !strcmp(text, "msg_internetradio") ||
+	       !strcmp(text, "msgtop_network_rss") ||
+	       !strcmp(text, "msgtop_network_browser") ||
+	       !strcmp(text, "msg_internet_search") ||
+	       !strcmp(text, "msg_psspot") ||
+	       !strcmp(text, "msg_gomessenger");
+}
+
+/* Items from columns that shift left under compaction, used to compare a
+   working shifted column (Game/PSN) against the blank Network one. */
+static int is_icon_debug_item(const char *text)
+{
+	return is_network_item_text(text) ||
+	       !strcmp(text, "msgtop_game_gamedl") ||
+	       !strcmp(text, "msgtop_game_savedata") ||
+	       !strcmp(text, "msg_game_hibernation") ||
+	       !strcmp(text, "msg_signup") ||
+	       !strcmp(text, "msg_ps_store") ||
+	       !strcmp(text, "msg_information_board");
+}
+
+static void log_network_item_add(const char *source, int location, int incoming_topitem,
+	int adjusted_topitem, SceVshItem *item)
+{
+	u32 obj = 0;
+	int current_top = -1;
+
+	if (!is_icon_debug_item(item->text))
+		return;
+
+	if (scene_ctx)
+		obj = *(u32 *)(scene_ctx + 0xA6C);
+	if (obj)
+		current_top = *(int *)(obj + 0x338);
+
+	/* Dump every field that could drive the per-item icon/plane lookup so a
+	   blank Network item can be compared to a rendering Game/PSN item. */
+	xlog("icon dump %s: text='%s' loc=%d top=%d adj=%d cur=%d id=%d reloc=%d act=%d arg=%d ctx=0x%08X sub=0x%08X img='%s' sh='%s' glow='%s'\n",
+		source,
+		item->text,
+		location,
+		incoming_topitem,
+		adjusted_topitem,
+		current_top,
+		item->id,
+		item->relocate,
+		item->action,
+		item->action_arg,
+		(u32)item->context,
+		(u32)item->subtitle,
+		item->image,
+		item->image_shadow,
+		item->image_glow);
+}
+
+static int should_preserve_network_topitem(int incoming_topitem, int adjusted_topitem,
+	SceVshItem *item)
+{
+	(void)incoming_topitem;
+	(void)adjusted_topitem;
+	(void)item;
+
+	/* DISABLED. Preserving the original Network topitem (6) made AddVshItem add
+	   the items at a column that no longer exists once pre-Game categories are
+	   compacted away: with N categories hidden, the visible layout only has
+	   (8 - N) columns (valid indices 0..7-N), so the native Network index lands
+	   out of range and vshmain silently drops every Network item -- Network
+	   appears empty. An item must be added at its in-range, adjusted topitem to
+	   render at all, so the column position cannot be used to keep the "native
+	   resource path". Any icon fix has to keep the adjusted topitem and address
+	   the atlas separately (e.g. remap each item's image keys, or the tail-entry
+	   preserve in PatchTopCategories). */
+	return 0;
+}
+
+/* The item-add wrappers must pass the compacted topitem into AddVshItem or the
+   shifted Network column is dropped as out-of-range. Later in vshmain, though,
+   the icon tracker at 0x2edbc still special-cases Network by its native slot 6
+   to queue the column's icon keys for loading. When Network shifts left, that
+   helper sees the adjusted slot (4/3/...) and skips the queueing work, leaving
+   the descriptors' loaded-texture pointer at 0. Remap only that helper's
+   topitem back to native Network so the existing preload path still runs. */
+static int TrackColumnIconKeyPatched(void *ctx, int topitem, const char *icon_key)
+{
+	int native_network_topitem;
+	int tracked_topitem = topitem;
+	int ret;
+
+	if (!hide_top_category(6)) {
+		native_network_topitem = 6;
+		if (count_hidden_top_categories_before(native_network_topitem) > 0 &&
+		    topitem == adjust_topitem_for_hidden_categories(native_network_topitem)) {
+			tracked_topitem = native_network_topitem;
+			xlog("network icon track remap: key='%s' top=%d track=%d\n",
+				icon_key, topitem, tracked_topitem);
+		}
+	}
+
+#if XLOG_ENABLED
+	if (tracked_topitem == 6 &&
+	    count_hidden_top_categories_before(6) > 0) {
+		network_resolve_probe_active = 1;
+		network_resolve_probe_key = icon_key;
+	}
+#endif
+
+	ret = TrackColumnIconKey(ctx, tracked_topitem, icon_key);
+
+#if XLOG_ENABLED
+	if (tracked_topitem == 6 &&
+	    count_hidden_top_categories_before(6) > 0 &&
+	    vsh_text_addr &&
+	    network_track_probe_count < 16) {
+		int count_a = *(int *)(vsh_text_addr + 0x7330);
+		int *queue_a = (int *)(vsh_text_addr + 0x72D8);
+		int count_b = *(int *)(vsh_text_addr + 0x7334);
+		int *queue_b = (int *)(vsh_text_addr + 0x7310);
+
+		xlog("network track state: key='%s' ret=%d A(count=%d q=%d,%d,%d,%d,%d,%d,%d,%d) B(count=%d q=%d,%d,%d,%d,%d,%d,%d,%d)\n",
+			icon_key, ret,
+			count_a,
+			queue_a[0], queue_a[1], queue_a[2], queue_a[3],
+			queue_a[4], queue_a[5], queue_a[6], queue_a[7],
+			count_b,
+			queue_b[0], queue_b[1], queue_b[2], queue_b[3],
+			queue_b[4], queue_b[5], queue_b[6], queue_b[7]);
+		network_track_probe_count++;
+	}
+	network_resolve_probe_active = 0;
+	network_resolve_probe_key = 0;
+#endif
+	return ret;
 }
 
 static int power_callback(int unknown, int powerInfo, void *arg)
@@ -1664,16 +1829,15 @@ static void PatchTopCategories(u32 text_addr)
 	   after the hidden category is broken" bug.
 
 	   Preserve the original tail-slot meta data instead of zeroing it.
-	   vshmain's UMD-preview path still performs some hardcoded lookups by
-	   original category index, so those backing arrays need valid data in
-	   their original slots.
+	   vshmain still performs some hardcoded lookups by original category
+	   index, so those backing arrays need valid data in their original
+	   slots.
 
-	   Keep the visible table tail blanked, though. If the runtime count
-	   trim does not fire on a given setup, preserving table tail entries
-	   makes a full category hide look like an ordinary empty category.
-	   Zeroing only the visible table tail preserves "2 = hide category"
-	   while still keeping the meta arrays available for original-index
-	   firmware lookups. */
+	   Preserve the table tail too. Network/UMD-related firmware paths still
+	   appear to resolve some per-category visual state by the original
+	   pre-compaction index; leaving the original entries in the unused tail
+	   is safer than blanking them. The runtime count patch trims the visible
+	   category count separately, so these tail entries are not rendered. */
 
 	meta0 = (u32 *)((char *)table - (8 * sizeof(u32) * 3));
 	meta1 = (u32 *)((char *)table - (8 * sizeof(u32) * 2));
@@ -1704,7 +1868,7 @@ static void PatchTopCategories(u32 text_addr)
 		filtered_meta0[out] = meta0[out];
 		filtered_meta1[out] = meta1[out];
 		filtered_meta2[out] = meta2[out];
-		memset(&filtered[out], 0, sizeof(filtered[out]));
+		memcpy(&filtered[out], &table[out], sizeof(filtered[out]));
 		out++;
 	}
 
@@ -1998,6 +2162,9 @@ static int is_xmbctrl_trigger(const char *text)
 
 int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 {
+	int incoming_topitem = topitem;
+	int add_topitem;
+
 	{
 		int adjusted_topitem;
 
@@ -2008,6 +2175,13 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 	}
 
 	maybe_disable_start_at_ms_for_movie_boot(item, 0, topitem);
+	log_network_item_add("wrapper", 0, incoming_topitem, topitem, item);
+	add_topitem = should_preserve_network_topitem(incoming_topitem, topitem, item) ?
+		incoming_topitem : topitem;
+	if (add_topitem != topitem) {
+		xlog("network preserve topitem: text='%s' orig=%d adj=%d add=%d\n",
+			item->text, incoming_topitem, topitem, add_topitem);
+	}
 
 	/* START_AT_MEMORY_STICK: capture the container + Game topitem the first time we
 	   see one of the items we're hiding, so the worker thread can re-add the
@@ -2033,15 +2207,17 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || xlog_hook(0, item))
-		return AddVshItem(a0, topitem, item);
+		return AddVshItem(a0, add_topitem, item);
 
 	return 0;
 }
 
 int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 {
+	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 1, topitem);
+	log_network_item_add("photo", 1, incoming_topitem, topitem, item);
 	if (!strcmp(item->text, "msgshare_ms"))
 		log_msgshare_ms_add("photo", 1, topitem);
 	if (maybe_suppress_media_readd(item, 1, topitem))
@@ -2056,8 +2232,10 @@ int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 {
+	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 2, topitem);
+	log_network_item_add("music", 2, incoming_topitem, topitem, item);
 	if (!strcmp(item->text, "msgshare_ms"))
 		log_msgshare_ms_add("music", 2, topitem);
 	if (maybe_suppress_media_readd(item, 2, topitem))
@@ -2072,8 +2250,10 @@ int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 {
+	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 3, topitem);
+	log_network_item_add("video", 3, incoming_topitem, topitem, item);
 	if (!strcmp(item->text, "msgshare_ms"))
 		log_msgshare_ms_add("video", 3, topitem);
 	if (maybe_suppress_media_readd(item, 3, topitem))
@@ -2088,8 +2268,10 @@ int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 {
+	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 4, topitem);
+	log_network_item_add("game", 4, incoming_topitem, topitem, item);
 	if (!strcmp(item->text, "msgshare_ms")) {
 		log_msgshare_ms_add("game", 4, topitem);
 	}
@@ -2105,8 +2287,10 @@ int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 {
+	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 5, topitem);
+	log_network_item_add("gms", 5, incoming_topitem, topitem, item);
 	if (maybe_suppress_media_readd(item, 5, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
@@ -2119,8 +2303,10 @@ int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
 {
+	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 6, topitem);
+	log_network_item_add("gef", 6, incoming_topitem, topitem, item);
 	if (maybe_suppress_media_readd(item, 6, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
@@ -2193,8 +2379,196 @@ static int UmdTopcatPositionShiftPatched(void *obj, int topitem)
 	return TopcatPositionFunc(obj, adjusted_topitem);
 }
 
+static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
+{
+	int t0_arg;
+	int mapped_a3 = a3;
+	int adjusted_network_topitem;
+	int ret;
+
+	asm volatile("move %0, $t0" : "=r"(t0_arg));
+
+	adjusted_network_topitem = adjust_topitem_for_hidden_categories(6);
+
+	if (!hide_top_category(6) &&
+	    count_hidden_top_categories_before(6) > 0 &&
+	    a3 == adjusted_network_topitem) {
+		mapped_a3 = 6;
+	}
+
+#if XLOG_ENABLED
+	if (network_dispatch_probe_count < 32 &&
+	    (a3 == 6 || a3 == adjusted_network_topitem ||
+	     a1 == 6 || a1 == adjusted_network_topitem)) {
+		xlog("network dispatch: a1=%d a2=%d a3=%d t0=%d mapped=%d\n",
+			a1, a2, a3, t0_arg, mapped_a3);
+		network_dispatch_probe_count++;
+	}
+#endif
+
+	asm volatile(
+		"move $a0, %1\n"
+		"move $a1, %2\n"
+		"move $a2, %3\n"
+		"move $a3, %4\n"
+		"move $t0, %5\n"
+		"jalr %6\n"
+		"nop\n"
+		"move %0, $v0\n"
+		: "=r"(ret)
+		: "r"(ctx), "r"(a1), "r"(a2), "r"(mapped_a3), "r"(t0_arg),
+		  "r"(NetworkDispatchFunc)
+		: "memory");
+
+#if XLOG_ENABLED
+	if (mapped_a3 == 6 &&
+	    network_dispatch_state_probe_count < 8) {
+		u32 table = *(u32 *)((char *)ctx + 0x10);
+		int count = *(int *)((char *)ctx + 0x14);
+		u32 arr = *(u32 *)((char *)ctx + 0x18);
+		int v0 = -1, v1 = -1, v2 = -1, v3 = -1, v4 = -1;
+		int v5 = -1, v6 = -1, v7 = -1, v8 = -1, v9 = -1;
+
+		if (arr && count > 0) v0 = *(int *)(arr + (0 * 4));
+		if (arr && count > 1) v1 = *(int *)(arr + (1 * 4));
+		if (arr && count > 2) v2 = *(int *)(arr + (2 * 4));
+		if (arr && count > 3) v3 = *(int *)(arr + (3 * 4));
+		if (arr && count > 4) v4 = *(int *)(arr + (4 * 4));
+		if (arr && count > 5) v5 = *(int *)(arr + (5 * 4));
+		if (arr && count > 6) v6 = *(int *)(arr + (6 * 4));
+		if (arr && count > 7) v7 = *(int *)(arr + (7 * 4));
+		if (arr && count > 8) v8 = *(int *)(arr + (8 * 4));
+		if (arr && count > 9) v9 = *(int *)(arr + (9 * 4));
+
+		xlog("network dispatch state: ctx=0x%08X table=0x%08X count=%d arr=0x%08X vals=%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+			(u32)ctx, table, count, arr,
+			v0, v1, v2, v3, v4, v5, v6, v7, v8, v9);
+		network_dispatch_state_probe_count++;
+	}
+#endif
+
+	return ret;
+}
+
+#if XLOG_ENABLED
+static volatile u32 icon_probe_seen[256];
+static volatile int icon_probe_seen_count;
+#endif
+
+static int IconResolveProbe(void *buf, void *atlas, void *entry)
+{
+#if XLOG_ENABLED
+	int loaded;
+	u32 off = (u32)entry - (u32)atlas;
+	u32 key;
+	int i, dup = 0;
+#endif
+	u32 entry_addr = (u32)entry;
+	void *record = 0;
+	u32 mod;
+
+#if XLOG_ENABLED
+	loaded = *(int *)((char *)entry + 0x18);
+	key = (off & 0x0FFFFFFF) | (loaded ? 0x80000000u : 0u);
+	for (i = 0; i < icon_probe_seen_count; i++) {
+		if (icon_probe_seen[i] == key) {
+			dup = 1;
+			break;
+		}
+	}
+	if (!dup && icon_probe_seen_count < 256) {
+		icon_probe_seen[icon_probe_seen_count++] = key;
+		xlog("ic: atlas=0x%08X off=0x%X loaded=%d\n", (u32)atlas, off, loaded);
+	}
+
+	if (loaded == 0) {
+		if (icon_layout_atlas != (u32)atlas) {
+			icon_layout_atlas = (u32)atlas;
+			icon_layout_main_mod = -1;
+			icon_layout_shadow_mod = -1;
+			icon_layout_glow_mod = -1;
+			icon_layout_prev2_off = 0;
+			icon_layout_prev1_off = 0;
+		}
+		if (icon_layout_prev1_off == off - 0x1C &&
+		    icon_layout_prev2_off == off - 0x38 &&
+		    icon_layout_main_mod < 0) {
+			icon_layout_main_mod = icon_layout_prev2_off % 0x58;
+			icon_layout_shadow_mod = icon_layout_prev1_off % 0x58;
+			icon_layout_glow_mod = off % 0x58;
+			xlog("icon layout: atlas=0x%08X mods=%X/%X/%X\n",
+				(u32)atlas,
+				icon_layout_main_mod,
+				icon_layout_shadow_mod,
+				icon_layout_glow_mod);
+		}
+		icon_layout_prev2_off = icon_layout_prev1_off;
+		icon_layout_prev1_off = off;
+	}
+#endif
+
+	/* The visible icon resolver receives one 0x1C plane block (main/shadow/glow)
+	   from a larger 0x58 icon record. Learn that plane layout directly from the
+	   live atlas, then lazily ask the stock ensure helper to load the containing
+	   record whenever the renderer hits a blank entry. This avoids depending on
+	   the wrong global base pointer that the earlier attempt used. */
+	if (vsh_text_addr &&
+	    EnsureIconEntryFunc &&
+	    count_hidden_top_categories_before(6) > 0 &&
+	    !hide_top_category(6) &&
+	    *(int *)((char *)entry + 0x18) == 0 &&
+	    icon_layout_atlas == (u32)atlas &&
+	    icon_layout_main_mod >= 0) {
+		mod = off % 0x58;
+		if (mod == (u32)icon_layout_main_mod)
+			record = (void *)(entry_addr - 0x04);
+		else if (mod == (u32)icon_layout_shadow_mod)
+			record = (void *)(entry_addr - 0x20);
+		else if (mod == (u32)icon_layout_glow_mod)
+			record = (void *)(entry_addr - 0x3C);
+
+		if (record) {
+			EnsureIconEntryFunc(atlas, record);
+#if XLOG_ENABLED
+			if (network_visible_prime_probe_count < 24) {
+				xlog("network visible prime: off=0x%X mod=0x%X rec=0x%08X post=%d\n",
+					off, mod, (u32)record,
+					*(int *)((char *)entry + 0x18));
+				network_visible_prime_probe_count++;
+			}
+#endif
+		}
+	}
+
+	return IconGetTex(buf, atlas, entry);
+}
+
+#if XLOG_ENABLED
+static int ResolveIconKeyProbePatched(const char *icon_key, int *out0, int *out1,
+	int *out2)
+{
+	int ret = ResolveIconKeyHelper(icon_key, out0, out1, out2);
+
+	if (network_resolve_probe_active &&
+	    network_resolve_probe_key &&
+	    network_track_probe_count < 32) {
+		xlog("network resolve key: key='%s' ret=%d out0=%d out1=%d out2=%d arg='%s'\n",
+			network_resolve_probe_key,
+			ret,
+			out0 ? *out0 : -1,
+			out1 ? *out1 : -1,
+			out2 ? *out2 : -1,
+			icon_key ? icon_key : "(null)");
+	}
+
+	return ret;
+}
+#endif
+
 void PatchVshMain(u32 text_addr)
 {
+	vsh_text_addr = text_addr;
+
 	/* Capture whatever the patch[1] JAL currently points at -- the real
 	   AddVshItem on stock firmware, or xmbctrl's wrapper on ARK-5/ARK-4
 	   (because OnModuleStart has already chained to `previous` before us,
@@ -2248,6 +2622,11 @@ void PatchVshMain(u32 text_addr)
 	if (devkit == FW(0x660)) {
 		TopcatSelectShiftedFunc = (int (*)(void *, int, int))(text_addr + 0x22998);
 		TopcatPositionFunc = (int (*)(void *, int))(text_addr + 0x3F4E0);
+		TrackColumnIconKey = (int (*)(void *, int, const char *))(text_addr + 0x2EDBC);
+		NetworkDispatchFunc = (int (*)(void *, int, int, int))(text_addr + 0x2DF34);
+		ResolveIconKeyHelper = (int (*)(const char *, int *, int *, int *))(text_addr + 0x2F0F8);
+		EnsureIconEntryFunc = (int (*)(void *, void *))(text_addr + 0x2EA7C);
+		FinalizeIconEntryFunc = (int (*)(void *, void *, int, int))(text_addr + 0x2EBE4);
 		MAKE_CALL(text_addr + 0x22C7C, UmdVideoAddPatchedRet);
 		MAKE_CALL(text_addr + 0x22C8C, UmdVideoSelectShiftPatched);
 		MAKE_CALL(text_addr + 0x22CDC, UmdVideoAddPatchedRet);
@@ -2272,6 +2651,36 @@ void PatchVshMain(u32 text_addr)
 		MAKE_CALL(text_addr + 0x23154, UmdTopcatPositionShiftPatched);
 		MAKE_CALL(text_addr + 0x23170, UmdTopcatPositionShiftPatched);
 		MAKE_CALL(text_addr + 0x231A8, UmdTopcatPositionShiftPatched);
+		MAKE_CALL(text_addr + 0x2261C, TrackColumnIconKeyPatched);
+
+		/* Both Network-only preload loops are hardcoded to a 5-slot window.
+		   When left-side category compaction shifts Network, the active early
+		   loop starts at the queue tail and only Browser/Search ever get
+		   textures. Move both the slot counter and the queue pointer back to
+		   the queue head. Network resolves 7 usable entries on this firmware
+		   (indices 252,253,255,256,257,258,259), so extend the loader window
+		   to 7 now that it starts from the correct head. */
+		_sw(0x00609021, text_addr + 0x2CE30);  /* move   s2, v1 */
+		_sw(0x24100000, text_addr + 0x2CE40);  /* addiu  s0, zr, 0 */
+		_sw(0x00A03821, text_addr + 0x2CE78);  /* move   a3, a1 */
+		_sw(0x2A220007, text_addr + 0x2CE94);  /* slti  v0, s1, 7 */
+		_sw(0x00608821, text_addr + 0x2E854);  /* move   s1, v1 */
+		_sw(0x24100000, text_addr + 0x2E858);  /* addiu  s0, zr, 0 */
+		_sw(0x00A03821, text_addr + 0x2E89C);  /* move   a3, a1 */
+		_sw(0x2A820007, text_addr + 0x2E8B4);  /* slti  v0, s4, 7 */
+		MAKE_CALL(text_addr + 0x16538, NetworkDispatchPatched);
+		IconGetTex = (int (*)(void *, void *, void *))(text_addr + 0x2D7D4);
+		MAKE_CALL(text_addr + 0x2D8A0, IconResolveProbe);
+
+#if XLOG_ENABLED
+		/* DIAGNOSTIC: hook the icon resolver's load-check (0x2d7d4, called from
+		   0x2d820 at 0x2d8a0). It receives (buf, atlas, entry); *(entry+0x18)==0
+		   means the texture isn't loaded -> the icon renders blank. Log distinct
+		   (atlas, entry-offset, loaded) tuples so we can see, for the render's
+		   item-icon resolves, which atlas Network uses and whether its entries
+		   are loaded -- shifted vs at native index 6. */
+		MAKE_CALL(text_addr + 0x2EDF4, ResolveIconKeyProbePatched);
+#endif
 	}
 
 	/* Photo Memory Stick */
@@ -2341,8 +2750,13 @@ int OnModuleStart(SceModule2 *mod)
 	u32 text_addr = mod->text_addr;
 
 	if(strcmp(modname, "vsh_module") == 0) {
+		vsh_seg1_addr = mod->segmentaddr[1];
+		vsh_seg1_size = mod->segmentsize[1];
 		xlog("OnModuleStart: vsh_module text=0x%08X patching s6=%d s51=%d s52=%d s53=%d s38=%d\n",
 			text_addr, set[6], set[51], set[52], set[53], set[38]);
+		xlog("OnModuleStart: vsh seg0=0x%08X size0=0x%08X seg1=0x%08X size1=0x%08X\n",
+			mod->segmentaddr[0], mod->segmentsize[0],
+			mod->segmentaddr[1], mod->segmentsize[1]);
 		PatchVshMain(text_addr);
 	}
 

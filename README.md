@@ -76,7 +76,7 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td align="center">✅&nbsp;Solved</td>
 </tr>
 <tr>
-  <td>Permanently missing <code>Network</code> category icons (if <code>Network</code> isn't hidden)</td>
+  <td>Permanently missing <code>Network</code> category icons</td>
   <td>https://youtu.be/KFEfO-UfcC0</td>
   <td><div align="center">➖</div></td>
 </tr>
@@ -86,14 +86,14 @@ On ARK CFW, the `Extras` category holds three injected items: **Custom Firmware 
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td><i>(Non-PSP Go)</i> If <code>Network</code> & <code>PlayStation®Network</code> aren't both also hidden OR <code>Game</code> is the 3rd listed category (apart from<code>Extras</code>): Blank UMD preview icons <in> (static-image preview icons only)
+  <td><i>(Non-PSP Go)</i> If <code>Network</code> & <code>PlayStation®Network</code> aren't both also hidden OR <code>Game</code> is the 3rd listed category (apart from <code>Extras</code>): Blank UMD preview icons <in> (static-image preview icons only)
 </td>
   <td><ul><li>https://youtu.be/IgET1a6V7_E (Blank icon)</li>
   <li>https://youtu.be/xTUn423SjPM (Blank icon + bg)</li></ul></td>
   <td><div align="center">➖</div></td>
 </tr>
 <tr>
-  <td><i>(Non-PSP Go)</i> Ejecting/Removing <code>UMD™</code> doesn't fully remove <code>UMD™</code>'s entry from the XMB until VSH reset</td>
+  <td><i>(Non-PSP Go)</i> Ejecting/Removing <code>UMD</code> doesn't fully remove <code>UMD</code>'s entry from the XMB until VSH reset</td>
   <td>https://youtu.be/yhgnUOTe94M</td>
   <td><div align="center">🟡&nbsp;Mostly solved — Still happens if the UMD's <code>Movie</code>/<code>Game</code> category is the 2nd listed (apart from <code>Extras</code>)</div></td>
 </tr>
