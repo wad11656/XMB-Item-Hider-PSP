@@ -369,6 +369,8 @@ static volatile u32 icon_layout_atlas = 0;
 static volatile int icon_layout_main_mod = -1;
 static volatile int icon_layout_shadow_mod = -1;
 static volatile int icon_layout_glow_mod = -1;
+static volatile u32 icon_layout_prev2_off;
+static volatile u32 icon_layout_prev1_off;
 
 #if XLOG_ENABLED
 static volatile int network_track_probe_count;
@@ -377,8 +379,6 @@ static const char *network_resolve_probe_key;
 static volatile int network_dispatch_probe_count;
 static volatile int network_dispatch_state_probe_count;
 static volatile int network_visible_prime_probe_count;
-static volatile u32 icon_layout_prev2_off;
-static volatile u32 icon_layout_prev1_off;
 #endif
 
 /* Used by AddVshItemFilter below (START_AT_MEMORY_STICK), but the rest of the
@@ -2473,7 +2473,6 @@ static volatile int icon_probe_seen_count;
 static int IconResolveProbe(void *buf, void *atlas, void *entry)
 {
 #if XLOG_ENABLED
-	int loaded;
 	u32 key;
 	int i, dup = 0;
 #endif
@@ -2481,9 +2480,9 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 	u32 entry_addr = (u32)entry;
 	void *record = 0;
 	u32 mod;
+	int loaded = *(int *)((char *)entry + 0x18);
 
 #if XLOG_ENABLED
-	loaded = *(int *)((char *)entry + 0x18);
 	key = (off & 0x0FFFFFFF) | (loaded ? 0x80000000u : 0u);
 	for (i = 0; i < icon_probe_seen_count; i++) {
 		if (icon_probe_seen[i] == key) {
@@ -2495,7 +2494,13 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 		icon_probe_seen[icon_probe_seen_count++] = key;
 		xlog("ic: atlas=0x%08X off=0x%X loaded=%d\n", (u32)atlas, off, loaded);
 	}
+#endif
 
+	/* Learn the icon plane layout from the live atlas. This MUST run in both
+	   the log and non-log builds: the visible-icon priming below depends on
+	   the icon_layout_* globals populated here. It previously lived inside the
+	   XLOG_ENABLED block, so non-log builds never learned the layout and the
+	   network category icons stayed invisible. */
 	if (loaded == 0) {
 		if (icon_layout_atlas != (u32)atlas) {
 			icon_layout_atlas = (u32)atlas;
@@ -2511,16 +2516,17 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 			icon_layout_main_mod = icon_layout_prev2_off % 0x58;
 			icon_layout_shadow_mod = icon_layout_prev1_off % 0x58;
 			icon_layout_glow_mod = off % 0x58;
+#if XLOG_ENABLED
 			xlog("icon layout: atlas=0x%08X mods=%X/%X/%X\n",
 				(u32)atlas,
 				icon_layout_main_mod,
 				icon_layout_shadow_mod,
 				icon_layout_glow_mod);
+#endif
 		}
 		icon_layout_prev2_off = icon_layout_prev1_off;
 		icon_layout_prev1_off = off;
 	}
-#endif
 
 	/* The visible icon resolver receives one 0x1C plane block (main/shadow/glow)
 	   from a larger 0x58 icon record. Learn that plane layout directly from the
