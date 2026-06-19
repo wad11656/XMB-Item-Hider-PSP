@@ -2020,6 +2020,21 @@ static int adjust_topitem_for_hidden_categories(int topitem)
 	return topitem;
 }
 
+static int need_network_icon_prime(void)
+{
+	/* The lazy prime is required in two known layouts:
+	   1. Network shifts left because something before it is hidden.
+	   2. PSN is the only hidden top category. Network stays at slot 6 there,
+	      but Remote Play still comes up blank until the column is scrolled. */
+	if (hide_top_category(6))
+		return 0;
+
+	if (count_hidden_top_categories_before(6) > 0)
+		return 1;
+
+	return top_category_hidden_count == 1 && hide_top_category(7);
+}
+
 static int is_ark_custom_item(const char *text)
 {
 	return !strcmp(text, "xmbmsgtop_sysconf_configuration") ||
@@ -2514,8 +2529,7 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 	   the wrong global base pointer that the earlier attempt used. */
 	if (vsh_text_addr &&
 	    EnsureIconEntryFunc &&
-	    count_hidden_top_categories_before(6) > 0 &&
-	    !hide_top_category(6) &&
+	    need_network_icon_prime() &&
 	    *(int *)((char *)entry + 0x18) == 0 &&
 	    icon_layout_atlas == (u32)atlas &&
 	    icon_layout_main_mod >= 0) {
