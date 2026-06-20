@@ -366,6 +366,13 @@ static int (*FinalizeIconEntryFunc)(void *ctx, void *entry, int topitem, int slo
    up stale-nonzero in the compacted layout, so the refresh skips the real load
    and the static preview stays blank. */
 static int (*DiscAssetNeeded)(void *ctx, int asset);
+/* vshmain's media-item remover (FUN_00023468): removes every item of one
+   relocate-group from one column. Every media-clear/eject path funnels through
+   it with HARDCODED NATIVE columns (UMD group 2 from cols 3-6, MS group 3 from
+   cols 2-5, ...). Under category compaction the items live at shifted columns,
+   so those removals miss them and they linger/duplicate. We wrap it to also
+   remove from the shifted column. */
+static int (*RemoveMediaByRelocate)(void *ctx, int topitem, int group);
 static int hide_top_category(int index);
 static volatile u32 vsh_text_addr = 0;
 static volatile u32 vsh_seg1_addr = 0;
@@ -672,13 +679,6 @@ static void reset_leading_umd_seen(const char *tag)
 	seen_leading_video_umd = 0;
 }
 
-static int is_game_umd_duplicate_item(const char *text)
-{
-	return !strcmp(text, "msgshare_umd") ||
-	       !strcmp(text, "msg_system_update") ||
-	       !strcmp(text, "msgtop_sysconf_update");
-}
-
 static int game_umd_item_mask(const char *text, int location)
 {
 	int base = 0;
@@ -763,92 +763,14 @@ static void arm_game_umd_readd_suppression(const char *tag, int count)
 
 static int maybe_suppress_media_readd(SceVshItem *item, int location, int topitem)
 {
-	volatile u32 *until = NULL;
-	u32 now;
-	int should_suppress = 0;
-
-	if (!strcmp(item->text, "msgshare_ms")) {
-		if (location == suppress_next_leading_ms_add &&
-		    location >= 1 && location <= 3 &&
-		    topitem == adjust_topitem_for_hidden_categories(location + 1)) {
-			suppress_next_leading_ms_add = 0;
-			xlog("media suppress: text='%s' loc=%d top=%d leading=1\n",
-				item->text, location, topitem);
-			return 1;
-		}
-		if (location != 4 ||
-		    topitem != adjust_topitem_for_hidden_categories(5) ||
-		    !suppress_next_game_ms_add)
-			return 0;
-
-		suppress_next_game_ms_add = 0;
-		xlog("media suppress: text='%s' loc=%d top=%d\n",
-			item->text, location, topitem);
-		return 1;
-	}
-	if (is_game_umd_duplicate_item(item->text)) {
-		if (!strcmp(item->text, "msgshare_umd") &&
-		    location == 3 &&
-		    topitem == adjust_topitem_for_hidden_categories(4) &&
-		    leading_umd_duplicate_risk_active() &&
-		    preferred_umd_location(item->text) == 3) {
-			if (seen_leading_video_umd) {
-				xlog("media suppress: text='%s' loc=%d top=%d leading_umd=1\n",
-					item->text, location, topitem);
-				return 1;
-			}
-			seen_leading_video_umd = 1;
-			xlog("media allow: text='%s' loc=%d top=%d leading_umd=1\n",
-				item->text, location, topitem);
-		}
-		if ((location == 3 || location == 4) &&
-		    (topitem == first_visible_media_topitem() ||
-		     (hide_top_category(4) &&
-		      topitem == adjust_topitem_for_hidden_categories(5)))) {
-			int preferred_location = preferred_umd_location(item->text);
-			int mask = game_umd_item_mask(item->text, location);
-
-			if (preferred_location && location != preferred_location) {
-				xlog("media suppress: text='%s' loc=%d top=%d preferred=%d seen_umd=0x%X\n",
-					item->text, location, topitem, preferred_location,
-					seen_game_umd_items);
-				return 1;
-			}
-
-			if (mask && (seen_game_umd_items & mask)) {
-				xlog("media suppress: text='%s' loc=%d top=%d seen_umd=0x%X\n",
-					item->text, location, topitem, seen_game_umd_items);
-				return 1;
-			}
-			if (!mask && suppress_next_game_umd_adds > 0) {
-				suppress_next_game_umd_adds--;
-				xlog("media suppress: text='%s' loc=%d top=%d remaining_umd=%d\n",
-					item->text, location, topitem, suppress_next_game_umd_adds);
-				return 1;
-			}
-			if (mask) {
-				seen_game_umd_items |= mask;
-				xlog("media allow: text='%s' loc=%d top=%d seen_umd=0x%X\n",
-					item->text, location, topitem, seen_game_umd_items);
-			}
-		}
-	}
-	if (!strcmp(item->text, "msgshare_umd")) {
-		until = &suppress_umd_adds_until;
-		should_suppress = topitem == 1;
-	}
-	else {
-		return 0;
-	}
-
-	now = sceKernelGetSystemTimeLow();
-	if (!*until || (int)(*until - now) <= 0 || !should_suppress)
-		return 0;
-
-	*until = 0;
-	xlog("media suppress: text='%s' loc=%d top=%d\n",
-		item->text, location, topitem);
-	return 1;
+	(void)item;
+	(void)location;
+	(void)topitem;
+	/* Media de-dupe removed for both UMD and Memory Stick: shift-aware removal
+	   (RemoveMediaShiftWrap) now clears the stale entry on eject across the
+	   native and compacted columns, so re-inserting re-adds it cleanly with no
+	   duplicate. The old suppression only blocked the re-add from coming back. */
+	return 0;
 }
 
 static void mark_boot_umd_replay_seen(int topitem)
@@ -2429,6 +2351,32 @@ static int DiscAssetNeededWrap(void *ctx, int asset)
 	return ret;
 }
 
+/* Wrap vshmain's media remover so a compacted layout also clears the shifted
+   column. The callers pass hardcoded NATIVE columns; the item actually sits at
+   adjust_topitem_for_hidden_categories(native), so remove there too. Catches
+   every removal path (full clear, per-eject UMD/MS) since they all funnel here.
+   Runs on vshmain's own thread (same context as the native removal). */
+static volatile int media_remove_probe;
+static int RemoveMediaShiftWrap(void *ctx, int topitem, int group)
+{
+	int ret = RemoveMediaByRelocate(ctx, topitem, group);
+	if (ctx && top_category_hidden_count > 0) {
+		int adj = adjust_topitem_for_hidden_categories(topitem);
+		if (adj != topitem) {
+			int r2 = RemoveMediaByRelocate(ctx, adj, group);
+			if (r2 > 0) {
+				ret += r2;
+				if (media_remove_probe < 60) {
+					xlog("media remove: col %d->%d grp %d removed %d\n",
+						topitem, adj, group, r2);
+					media_remove_probe++;
+				}
+			}
+		}
+	}
+	return ret;
+}
+
 static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 {
 	int t0_arg;
@@ -2724,6 +2672,37 @@ void PatchVshMain(u32 text_addr)
 		_sw(0x00A03821, text_addr + 0x2E89C);  /* move   a3, a1 */
 		_sw(0x2A820007, text_addr + 0x2E8B4);  /* slti  v0, s4, 7 */
 		MAKE_CALL(text_addr + 0x16538, NetworkDispatchPatched);
+		/* Make media-item removal compaction-aware: wrap every call site of the
+		   remover (FUN_00023468) so it also clears the shifted column. */
+		RemoveMediaByRelocate = (int (*)(void *, int, int))(text_addr + 0x23468);
+		MAKE_CALL(text_addr + 0x203c8, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x203d8, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x203e8, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x203f8, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x20408, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x20418, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x20428, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x20438, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x20448, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x205d4, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x205e4, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x205f4, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x20604, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x20614, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x23680, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x23690, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x236a0, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x24138, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x24148, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x24158, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x24168, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x24178, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x2a3e8, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x2a3f8, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x2a408, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x2a418, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x2a428, RemoveMediaShiftWrap);
+		MAKE_CALL(text_addr + 0x2ae4c, RemoveMediaShiftWrap);
 		/* FIX: wrap the disc-preview "asset needed?" check at all 12 sites to
 		   force the ICON0 load when categories are hidden. */
 		DiscAssetNeeded = (int (*)(void *, int))(text_addr + 0x26334);
