@@ -361,6 +361,11 @@ static int (*ResolveIconKeyHelper)(const char *icon_key, int *out0, int *out1,
 static int (*IconGetTex)(void *buf, void *atlas, void *entry);
 static int (*EnsureIconEntryFunc)(void *ctx, void *entry);
 static int (*FinalizeIconEntryFunc)(void *ctx, void *entry, int topitem, int slot);
+/* vshmain disc-preview "is asset N still needed?" check (FUN_00026334): returns
+   *(ctx->e70 + slot[N]) != 0 (0 = load it). For ICON0 (asset 2) that slot comes
+   up stale-nonzero in the compacted layout, so the refresh skips the real load
+   and the static preview stays blank. */
+static int (*DiscAssetNeeded)(void *ctx, int asset);
 static int hide_top_category(int index);
 static volatile u32 vsh_text_addr = 0;
 static volatile u32 vsh_seg1_addr = 0;
@@ -910,7 +915,8 @@ static int is_icon_debug_item(const char *text)
 	       !strcmp(text, "msg_game_hibernation") ||
 	       !strcmp(text, "msg_signup") ||
 	       !strcmp(text, "msg_ps_store") ||
-	       !strcmp(text, "msg_information_board");
+	       !strcmp(text, "msg_information_board") ||
+	       !strcmp(text, "msgshare_umd");
 }
 
 static void log_network_item_add(const char *source, int location, int incoming_topitem,
@@ -2348,6 +2354,7 @@ static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 
 	xlog("umd video add text='%s' top=%d adj=%d\n",
 		item->text, topitem, adjusted_topitem);
+	log_network_item_add("umdvid", 3, topitem, adjusted_topitem, item);
 	return AddVshItem(a0, adjusted_topitem, item);
 }
 
@@ -2362,6 +2369,7 @@ static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 
 	xlog("umd game add text='%s' top=%d adj=%d\n",
 		item->text, topitem, adjusted_topitem);
+	log_network_item_add("umdgame", 4, topitem, adjusted_topitem, item);
 	return AddVshItem(a0, adjusted_topitem, item);
 }
 
@@ -2392,6 +2400,23 @@ static int UmdTopcatPositionShiftPatched(void *obj, int topitem)
 
 	xlog("umd pos orig=%d adj=%d\n", topitem, adjusted_topitem);
 	return TopcatPositionFunc(obj, adjusted_topitem);
+}
+
+/* FIX: force ICON0 (asset 2) to report "needs loading" in the compacted layout
+   so the disc-preview refresh actually attempts the real load instead of
+   skipping it on a stale state slot. Re-fires each refresh until it sticks. */
+static volatile int disc_force_count;
+static int DiscAssetNeededWrap(void *ctx, int asset)
+{
+	int ret = DiscAssetNeeded(ctx, asset);
+	if (asset == 2 && top_category_hidden_count > 0 && ret != 0) {
+		if (disc_force_count < 40) {
+			xlog("asset2 needed: forced load (was 0x%08X)\n", (u32)ret);
+			disc_force_count++;
+		}
+		return 0;
+	}
+	return ret;
 }
 
 static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
@@ -2689,6 +2714,21 @@ void PatchVshMain(u32 text_addr)
 		_sw(0x00A03821, text_addr + 0x2E89C);  /* move   a3, a1 */
 		_sw(0x2A820007, text_addr + 0x2E8B4);  /* slti  v0, s4, 7 */
 		MAKE_CALL(text_addr + 0x16538, NetworkDispatchPatched);
+		/* FIX: wrap the disc-preview "asset needed?" check at all 12 sites to
+		   force the ICON0 load when categories are hidden. */
+		DiscAssetNeeded = (int (*)(void *, int))(text_addr + 0x26334);
+		MAKE_CALL(text_addr + 0x1aae0, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1ab34, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1ac84, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1acc0, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1ad64, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1adbc, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1ae18, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1ae74, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1aeac, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1aee4, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1af1c, DiscAssetNeededWrap);
+		MAKE_CALL(text_addr + 0x1af54, DiscAssetNeededWrap);
 		IconGetTex = (int (*)(void *, void *, void *))(text_addr + 0x2D7D4);
 		MAKE_CALL(text_addr + 0x2D8A0, IconResolveProbe);
 
