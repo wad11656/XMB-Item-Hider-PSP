@@ -1355,7 +1355,12 @@ static int detect_mounted_umd_video(void)
 	if (has_video || has_game)
 		xlog("start_ms: disc0 probe video=%d game=%d\n", has_video, has_game);
 
-	return has_video;
+	/* Only a PURE movie disc means the XMB should boot to Movie instead of the
+	   START_AT_MEMORY_STICK Game/Memory-Stick target. A disc that also carries
+	   PSP_GAME content (a game UMD, or a hybrid) must keep START_AT_MEMORY_STICK
+	   so its UMD Update item stays hidden (crash guard), the cursor still parks
+	   on Memory Stick, and the ARK CFW items keep their Game ordering. */
+	return has_video && !has_game;
 }
 
 static int maybe_disable_start_at_ms_from_disc_layout(SceVshItem *item, int location)
@@ -1913,9 +1918,14 @@ int skip(SceVshItem *item, int location)
 	   MS. We capture a copy of each first; once the XMB is ready the post-boot
 	   thread clears boot_hide_for_ms and re-adds them directly via AddVshItem
 	   (see start_at_ms_thread). */
+	/* A movie UMD whose Movie column is still visible belongs in Movie, so it
+	   must NOT enter the START_AT_MEMORY_STICK boot-hide (which would hide it and
+	   re-add it into Game). Only boot-hide the UMD when Game is its real home: a
+	   game UMD, or a movie UMD with the Movie category hidden. */
 	if (boot_hide_for_ms &&
 	    (!idnm("msgtop_game_savedata") || !idnm("msgtop_game_gamedl") ||
-	     !idnm("msgshare_umd"))) {
+	     (!idnm("msgshare_umd") &&
+	      !(current_umd_is_video() > 0 && !hide_top_category(4))))) {
 		if (maybe_disable_start_at_ms_from_disc_layout(item, location))
 			return 1;
 		xlog("start_ms: boot-hide capture text='%s' loc=%d\n",
