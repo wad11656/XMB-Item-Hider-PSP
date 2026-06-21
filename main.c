@@ -172,6 +172,7 @@ static void xlog_raw_both(const char *msg)
 	sceIoClose(fd);
 }
 
+
 static void xlog_append_char(char *buf, int *pos, int max, char ch)
 {
 	if (*pos < max - 1)
@@ -388,8 +389,6 @@ static volatile u32 icon_layout_prev1_off;
 static volatile int network_track_probe_count;
 static volatile int network_resolve_probe_active;
 static const char *network_resolve_probe_key;
-static volatile int network_dispatch_probe_count;
-static volatile int network_dispatch_state_probe_count;
 static volatile int network_visible_prime_probe_count;
 #endif
 
@@ -1237,100 +1236,28 @@ static int path_is_dir(const char *path)
 	return 1;
 }
 
-static int detect_boot_umd_video(void)
-{
-	pspUmdInfo info;
-	int ret;
-
-	if (sceUmdCheckMedium() <= 0)
-		return 0;
-
-	memset(&info, 0, sizeof(info));
-	info.size = sizeof(info);
-
-	ret = sceUmdGetDiscInfo(&info);
-	if (ret < 0) {
-		/* During VSH startup the drive can still be initializing; give it a short
-		   chance to settle so START_AT_MEMORY_STICK can be disabled before the
-		   XMB item walk begins on movie boots. */
-		sceUmdWaitDriveStatWithTimer(PSP_UMD_READY, 250000);
-		ret = sceUmdGetDiscInfo(&info);
-	}
-
-	if (ret < 0) {
-		xlog("start_ms: umd info unavailable ret=0x%08X\n", ret);
-		return 0;
-	}
-
-	xlog("start_ms: umd type=0x%X\n", info.type);
-	return (info.type & PSP_UMD_TYPE_VIDEO) != 0;
-}
-
-static int detect_mounted_umd_video(void)
-{
-	int has_video;
-	int has_game;
-
-	has_video = path_is_dir("disc0:/UMD_VIDEO");
-	has_game = path_is_dir("disc0:/PSP_GAME");
-
-	if (has_video || has_game)
-		xlog("start_ms: disc0 probe video=%d game=%d\n", has_video, has_game);
-
-	/* Only a PURE movie disc means the XMB should boot to Movie instead of the
-	   START_AT_MEMORY_STICK Game/Memory-Stick target. A disc that also carries
-	   PSP_GAME content (a game UMD, or a hybrid) must keep START_AT_MEMORY_STICK
-	   so its UMD Update item stays hidden (crash guard), the cursor still parks
-	   on Memory Stick, and the ARK CFW items keep their Game ordering. */
-	return has_video && !has_game;
-}
-
 static int maybe_disable_start_at_ms_from_disc_layout(SceVshItem *item, int location)
 {
-	if (!start_at_ms_flag || !boot_hide_for_ms)
-		return 0;
-
-	if (!detect_mounted_umd_video())
-		return 0;
-
-	/* vshmain has mounted a movie-disc layout on disc0:, so the START_AT
-	   Game/Memory Stick override is wrong for this boot. Stop hiding now.
-	   If the worker thread already started, clearing boot_hide_for_ms lets it
-	   exit its wait loop on the next poll and restore any Game items we had
-	   already captured before the movie probe became available. */
-	boot_hide_for_ms = 0;
-	start_at_ms_flag = 0;
-	umd_captured = 0;
-	xlog("start_ms: disabled via disc0 probe text='%s' loc=%d\n",
-		item->text, location);
-	return 1;
+	(void)item;
+	(void)location;
+	/* An inserted UMD (movie or game) must NOT disable START_AT_MEMORY_STICK or
+	   disturb the ARK item ordering -- it only disables the UMD Update entry,
+	   which is handled separately. So park-on-Memory-Stick stays active
+	   regardless of the disc0 layout. (Previously a pure movie disc cleared the
+	   flag here, which is what broke ARK ordering + start_ms with a disc in.) */
+	return 0;
 }
 
 static void maybe_disable_start_at_ms_for_movie_boot(SceVshItem *item, int location,
 	int topitem)
 {
-	int video_topitem;
-
-	if (!start_at_ms_flag || !boot_hide_for_ms)
-		return;
-
-	if (strcmp(item->text, "msgshare_umd"))
-		return;
-
-	video_topitem = adjust_topitem_for_hidden_categories(4);
-	xlog("start_ms: msgshare_umd loc=%d topitem=%d video_topitem=%d\n",
-		location, topitem, video_topitem);
-	if (location != 3 && topitem != video_topitem)
-		return;
-
-	/* A UMD movie is being routed into the Video/Movie column, so the XMB's
-	   natural boot target is Movie rather than Game. Disable the boot-hide
-	   override before this item reaches skip(), otherwise it'll get captured
-	   and later re-added into Game. */
-	boot_hide_for_ms = 0;
-	start_at_ms_flag = 0;
-	xlog("start_ms: disabled for movie boot loc=%d topitem=%d\n",
-		location, topitem);
+	(void)item;
+	(void)location;
+	(void)topitem;
+	/* Keep START_AT_MEMORY_STICK active even when a movie UMD is present and
+	   routes into the Movie column. The movie entry still lands in Movie (handled
+	   elsewhere); start_ms must not be cleared, or ARK ordering + the MS park
+	   target break whenever a disc is inserted. */
 }
 
 static int start_at_ms_thread(SceSize args, void *argp)
@@ -1797,12 +1724,39 @@ static void PatchTopCategories(u32 text_addr)
 		return;
 	}
 
-	while (out < 8) {
-		filtered_meta0[out] = meta0[out];
-		filtered_meta1[out] = meta1[out];
-		filtered_meta2[out] = meta2[out];
-		memcpy(&filtered[out], &table[out], sizeof(filtered[out]));
-		out++;
+	/* Fill the unused tail slots [out..8).
+
+	   Normally we preserve each original entry at its physical slot so
+	   vshmain's hardcoded per-original-index lookups (notably network=6,
+	   PSN=7) still resolve from the tail.
+
+	   But when EXACTLY ONE category is hidden the visible range runs all the
+	   way through slot 6, so PSN (original index 7) is compacted into slot 6
+	   AND this tail-fill would copy the original PSN into slot 7 -- a verbatim
+	   duplicate. vshmain then walks the slot-7 PSN as a phantom 8th category
+	   (the doubled "psn state"), which crashes the boot. There is only one
+	   tail slot in that case, so we cannot preserve both network(6) and PSN(7)
+	   anyway; drop the hidden category's original into the tail instead so no
+	   visible category is duplicated. (>=2 hidden keeps the original behaviour:
+	   it has >=2 tail slots and never duplicates a visible category.) */
+	if (top_category_hidden_count == 1) {
+		for (i = 0; i < 8 && out < 8; i++) {
+			if (!hide_top_category(i))
+				continue;
+			filtered_meta0[out] = meta0[i];
+			filtered_meta1[out] = meta1[i];
+			filtered_meta2[out] = meta2[i];
+			memcpy(&filtered[out], &table[i], sizeof(filtered[out]));
+			out++;
+		}
+	} else {
+		while (out < 8) {
+			filtered_meta0[out] = meta0[out];
+			filtered_meta1[out] = meta1[out];
+			filtered_meta2[out] = meta2[out];
+			memcpy(&filtered[out], &table[out], sizeof(filtered[out]));
+			out++;
+		}
 	}
 
 	memcpy(meta0, filtered_meta0, sizeof(filtered_meta0));
@@ -1818,6 +1772,22 @@ int skip(SceVshItem *item, int location)
 	int idnm(char *name)
 	{
 		return strcmp(item->text, name);
+	}
+
+	/* Single-hide boot stabilizer. On the fast (non-log) path the count==1 layout
+	   overruns vshmain's asynchronous icon/texture loading during the initial
+	   XMB item walk and faults before the XMB appears; the log build only "works"
+	   because its per-line MS writes incidentally throttle the walk (each write
+	   yields the thread, letting the async loads drain). Reproduce that throttle
+	   directly with a brief yield per item -- count==1 only, and only for the
+	   first ~200 items (the boot walk), so navigation and all other layouts are
+	   untouched. */
+	{
+		static volatile int boot_throttle_n;
+		if (top_category_hidden_count == 1 && boot_throttle_n < 200) {
+			boot_throttle_n++;
+			sceKernelDelayThread(4000);
+		}
 	}
 
 	/* START_AT_MEMORY_STICK: lazily spawn the show-savedata thread the first time
@@ -2377,6 +2347,7 @@ static int RemoveMediaShiftWrap(void *ctx, int topitem, int group)
 	return ret;
 }
 
+
 static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 {
 	int t0_arg;
@@ -2394,15 +2365,21 @@ static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 		mapped_a3 = 6;
 	}
 
-#if XLOG_ENABLED
-	if (network_dispatch_probe_count < 32 &&
-	    (a3 == 6 || a3 == adjusted_network_topitem ||
-	     a1 == 6 || a1 == adjusted_network_topitem)) {
-		xlog("network dispatch: a1=%d a2=%d a3=%d t0=%d mapped=%d\n",
-			a1, a2, a3, t0_arg, mapped_a3);
-		network_dispatch_probe_count++;
+	/* Single-hide: PSN's visible column equals Network's native index 6, so the
+	   stock handler FUN_0002df34 (hardcoded: param_4==6 -> Network table, and if
+	   param_2/a1==6 -> the col-6 network scroll FUN_0002ddbc) would treat the PSN
+	   column and a PSN-resting cursor as Network -- running the network scroll on
+	   PSN's stale state and freezing during navigation. Remap PSN's visible
+	   position to its native index 7 (which FUN_0002df34 ignores) in both the
+	   cursor (a1) and target (a3) so the network block is skipped for PSN. */
+	if (top_category_hidden_count == 1) {
+		int psn_visible = adjust_topitem_for_hidden_categories(7);
+
+		if (a3 == psn_visible)
+			mapped_a3 = 7;
+		if (a1 == psn_visible)
+			a1 = 7;
 	}
-#endif
 
 	asm volatile(
 		"move $a0, %1\n"
@@ -2418,33 +2395,6 @@ static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 		  "r"(NetworkDispatchFunc)
 		: "memory");
 
-#if XLOG_ENABLED
-	if (mapped_a3 == 6 &&
-	    network_dispatch_state_probe_count < 8) {
-		u32 table = *(u32 *)((char *)ctx + 0x10);
-		int count = *(int *)((char *)ctx + 0x14);
-		u32 arr = *(u32 *)((char *)ctx + 0x18);
-		int v0 = -1, v1 = -1, v2 = -1, v3 = -1, v4 = -1;
-		int v5 = -1, v6 = -1, v7 = -1, v8 = -1, v9 = -1;
-
-		if (arr && count > 0) v0 = *(int *)(arr + (0 * 4));
-		if (arr && count > 1) v1 = *(int *)(arr + (1 * 4));
-		if (arr && count > 2) v2 = *(int *)(arr + (2 * 4));
-		if (arr && count > 3) v3 = *(int *)(arr + (3 * 4));
-		if (arr && count > 4) v4 = *(int *)(arr + (4 * 4));
-		if (arr && count > 5) v5 = *(int *)(arr + (5 * 4));
-		if (arr && count > 6) v6 = *(int *)(arr + (6 * 4));
-		if (arr && count > 7) v7 = *(int *)(arr + (7 * 4));
-		if (arr && count > 8) v8 = *(int *)(arr + (8 * 4));
-		if (arr && count > 9) v9 = *(int *)(arr + (9 * 4));
-
-		xlog("network dispatch state: ctx=0x%08X table=0x%08X count=%d arr=0x%08X vals=%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-			(u32)ctx, table, count, arr,
-			v0, v1, v2, v3, v4, v5, v6, v7, v8, v9);
-		network_dispatch_state_probe_count++;
-	}
-#endif
-
 	return ret;
 }
 
@@ -2458,6 +2408,7 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 #if XLOG_ENABLED
 	u32 key;
 	int i, dup = 0;
+	int newly_seen = 0;
 #endif
 	u32 off = (u32)entry - (u32)atlas;
 	u32 entry_addr = (u32)entry;
@@ -2475,6 +2426,7 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 	}
 	if (!dup && icon_probe_seen_count < 256) {
 		icon_probe_seen[icon_probe_seen_count++] = key;
+		newly_seen = 1;
 		xlog("ic: atlas=0x%08X off=0x%X loaded=%d\n", (u32)atlas, off, loaded);
 	}
 #endif
@@ -2543,7 +2495,23 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 		}
 	}
 
+#if XLOG_ENABLED
+	{
+		/* Post-call marker (deduped to match the pre-call 'ic:' line, so this
+		   stays low-volume and xlog can flush each line to MS before the next
+		   op). If the crash is INSIDE IconGetTex, the faulting entry's 'ic:'
+		   line is present but its 'icret' is not -- localizing the freeze.
+		   When network is hidden the prime block above is inert (need_network_
+		   icon_prime()==0), so the only work between the two markers is the
+		   IconGetTex call itself. */
+		int ret = IconGetTex(buf, atlas, entry);
+		if (newly_seen)
+			xlog("icret off=0x%X tex=0x%08X\n", off, (u32)ret);
+		return ret;
+	}
+#else
 	return IconGetTex(buf, atlas, entry);
+#endif
 }
 
 #if XLOG_ENABLED
@@ -2667,10 +2635,35 @@ void PatchVshMain(u32 text_addr)
 		_sw(0x24100000, text_addr + 0x2CE40);  /* addiu  s0, zr, 0 */
 		_sw(0x00A03821, text_addr + 0x2CE78);  /* move   a3, a1 */
 		_sw(0x2A220007, text_addr + 0x2CE94);  /* slti  v0, s1, 7 */
+		/* THE single-hide crash: FUN_0002cc9c (this same hardcoded col-6 network
+		   icon-finalize loop, called right after the 0x208xx column renderer) is
+		   what actually freezes the boot. With network hidden AND exactly one
+		   category hidden, the runtime count is 7 so the loop treats column 6 as
+		   active, but Network is the hidden category -- its icon queue is
+		   stale/empty and the widened (above) window walks it into a wild
+		   FinalizeIconEntry. The loop's only exit is `beqz bound, 0x2cea8` at
+		   0x2CE58; force it unconditional (`b 0x2cea8`) so the loop is skipped
+		   entirely. This applies to ANY single hide (count==1): whether Network
+		   is the hidden category (no column to draw) or merely shifted (photo/
+		   music/video hidden), the network icon queue (text+0x7320/0x7330/0x7344)
+		   comes up as garbage in the count==7 layout, so walking it crashes
+		   either way. Multi-hide (count<=6) keeps the stock conditional branch. */
+		/* FUN_0002e2bc's category-6 (network) icon-finalize block: widen its
+		   window to 7 from the queue head so a visible-but-shifted Network
+		   resolves all its icons. */
 		_sw(0x00608821, text_addr + 0x2E854);  /* move   s1, v1 */
 		_sw(0x24100000, text_addr + 0x2E858);  /* addiu  s0, zr, 0 */
 		_sw(0x00A03821, text_addr + 0x2E89C);  /* move   a3, a1 */
 		_sw(0x2A820007, text_addr + 0x2E8B4);  /* slti  v0, s4, 7 */
+		/* Single-hide (count==1): the network icon queue is garbage in the
+		   count==7 layout, so skip BOTH hardcoded col-6 network finalize loops
+		   that would walk it -- FUN_0002cc9c (boot crash) at 0x2CE58 and the
+		   analogous FUN_0002e2bc loop (reached on navigation) at 0x2E878 -- by
+		   forcing each loop's bound-check branch to its exit unconditionally. */
+		if (top_category_hidden_count == 1) {
+			_sw(0x10000013, text_addr + 0x2CE58);  /* b 0x2cea8 (FUN_0002cc9c) */
+			_sw(0x10000013, text_addr + 0x2E878);  /* b 0x2e8c8 (FUN_0002e2bc) */
+		}
 		MAKE_CALL(text_addr + 0x16538, NetworkDispatchPatched);
 		/* Make media-item removal compaction-aware: wrap every call site of the
 		   remover (FUN_00023468) so it also clears the shifted column. */
@@ -2870,15 +2863,13 @@ int module_start(SceSize args, void *argp)
 	set[57] = cfg(global_category, "MOVE_ARK_EXTRAS");
 	start_at_ms_flag = cfg(global_category, "START_AT_MEMORY_STICK");
 	if (start_at_ms_flag) {
-		if (detect_boot_umd_video()) {
-			start_at_ms_flag = 0;
-			xlog("start_ms: disabled at boot for physical UMD movie\n");
-		} else {
-			boot_hide_for_ms = 1;
-			/* Game's displayed index = 5 minus any hidden pre-Game categories,
-			   so the XMB-ready signal matches regardless of what's hidden. */
-			start_ms_game_index = adjust_topitem_for_hidden_categories(5);
-		}
+		/* START_AT_MEMORY_STICK stays active regardless of an inserted UMD
+		   (movie or game). A disc only disables the UMD Update entry, not the
+		   Memory-Stick park target or the ARK item ordering. */
+		boot_hide_for_ms = 1;
+		/* Game's displayed index = 5 minus any hidden pre-Game categories,
+		   so the XMB-ready signal matches regardless of what's hidden. */
+		start_ms_game_index = adjust_topitem_for_hidden_categories(5);
 	}
 	boot_umd_defer_active = should_defer_boot_umd_add() && sceUmdCheckMedium() > 0;
 	boot_umd_defer_captured = 0;
