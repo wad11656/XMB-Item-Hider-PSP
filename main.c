@@ -367,6 +367,10 @@ static int (*FinalizeIconEntryFunc)(void *ctx, void *entry, int topitem, int slo
    up stale-nonzero in the compacted layout, so the refresh skips the real load
    and the static preview stays blank. */
 static int (*DiscAssetNeeded)(void *ctx, int asset);
+/* vshmain disc-preview asset clearer (FUN_000290b4): clears the per-asset
+   state/pointers under ctx->e70 using the same native teardown path the stock
+   preview code takes when rebuilding an asset. */
+static int (*ClearDiscAsset)(void *ctx, int asset);
 /* vshmain's media-item remover (FUN_00023468): removes every item of one
    relocate-group from one column. Every media-clear/eject path funnels through
    it with HARDCODED NATIVE columns (UMD group 2 from cols 3-6, MS group 3 from
@@ -375,6 +379,7 @@ static int (*DiscAssetNeeded)(void *ctx, int asset);
    remove from the shifted column. */
 static int (*RemoveMediaByRelocate)(void *ctx, int topitem, int group);
 static int hide_top_category(int index);
+static int UmdGameSelectShiftPatched(void *ctx, int topitem);
 static volatile u32 vsh_text_addr = 0;
 static volatile u32 vsh_seg1_addr = 0;
 static volatile u32 vsh_seg1_size = 0;
@@ -403,6 +408,11 @@ static volatile int captured_ark_count = 0;
 int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 {
 	int adjusted_topitem = topitem;
+
+	if (!strcmp(item->text, "msgshare_umd")) {
+		xlog("filter umd: top=%d boot_hide=%d\n",
+			topitem, boot_hide_for_ms);
+	}
 
 	/* Items reaching us here either came from xmbctrl forwarding (the
 	   trigger item, or its CFW item insertions) or any other caller of
@@ -1260,6 +1270,25 @@ static void maybe_disable_start_at_ms_for_movie_boot(SceVshItem *item, int locat
 	   target break whenever a disc is inserted. */
 }
 
+static void refresh_current_game_top_after_replay(const char *tag)
+{
+	u32 obj = 0;
+
+	if (!scene_ctx)
+		return;
+
+	obj = *(u32 *)(scene_ctx + 0xA6C);
+	if (!obj)
+		return;
+
+	if (*(int *)(obj + 0x338) != game_topitem)
+		return;
+
+	xlog("%s: refresh current game top native=5 shown=%d ctx=0x%08X\n",
+		tag, game_topitem, (u32)scene_ctx);
+	UmdGameSelectShiftPatched((void *)scene_ctx, 5);
+}
+
 static int start_at_ms_thread(SceSize args, void *argp)
 {
 	u32 obj;
@@ -1293,6 +1322,9 @@ static int start_at_ms_thread(SceSize args, void *argp)
 	   filter via the prologue patch; boot_hide_for_ms is now clear so they
 	   pass through and get added.) */
 	boot_hide_for_ms = 0;
+	xlog("start_ms: replay begin game_ctx=%d umd=%d gamedl=%d savedata=%d ark=%d top=%d\n",
+		game_ctx_captured, umd_captured, gamedl_captured, savedata_captured,
+		captured_ark_count, game_topitem);
 	if (game_ctx_captured) {
 		int k;
 		/* Re-add the relocated ARK CFW items FIRST so they land at the TOP of
@@ -1300,13 +1332,18 @@ static int start_at_ms_thread(SceSize args, void *argp)
 		   All deferred to here, after the cursor is placed, so it stays on MS. */
 		for (k = 0; k < captured_ark_count; k++)
 			AddVshItem((void *)game_a0, game_topitem, &captured_ark[k]);
-		if (umd_captured)
+		if (umd_captured) {
+			xlog("start_ms: replay umd top=%d a0=0x%08X\n",
+				game_topitem, (u32)game_a0);
 			AddVshItem((void *)game_a0, game_topitem, &captured_umd);
+			refresh_current_game_top_after_replay("start_ms");
+		}
 		if (gamedl_captured)
 			AddVshItem((void *)game_a0, game_topitem, &captured_gamedl);
 		if (savedata_captured)
 			AddVshItem((void *)game_a0, game_topitem, &captured_savedata);
 	}
+	xlog("start_ms: replay end\n");
 	return 0;
 }
 
@@ -2312,10 +2349,26 @@ static int DiscAssetNeededWrap(void *ctx, int asset)
 {
 	int ret = DiscAssetNeeded(ctx, asset);
 	if (asset == 2 && top_category_hidden_count > 0 && ret != 0) {
-		if (disc_force_count < 40) {
-			xlog("asset2 needed: forced load (was 0x%08X)\n", (u32)ret);
+		if (ClearDiscAsset)
+			ClearDiscAsset(ctx, asset);
+#if XLOG_ENABLED
+		/* Read-only A/B diagnostic. Disc type +0x130/+0x134, branch flags +0xfc,
+		   cursor column obj+0x338, and the ICON0 texture/state on ctx_e70 after
+		   clearing the native asset slot. Compare a WORKING hide config
+		   (photo+music+psn) vs the BLANK one (video+network). */
+		if (disc_force_count < 24) {
+			u32 c = (u32)ctx;
+			u32 e70 = *(u32 *)(c + 0xe70);
+			u32 obj = *(u32 *)(c + 0xa6c);
+
+			xlog("dbg: t130=%d t134=%d flags=%08X col=%d e70=%08X tex08=%08X st30=%08X (was %08X)\n",
+				*(int *)(c + 0x130), *(int *)(c + 0x134), *(u32 *)(c + 0xfc),
+				obj ? *(int *)(obj + 0x338) : -1, e70,
+				e70 ? *(u32 *)(e70 + 8) : 0,
+				e70 ? *(u32 *)(e70 + 0x30) : 0, (u32)ret);
 			disc_force_count++;
 		}
+#endif
 		return 0;
 	}
 	return ret;
@@ -2699,6 +2752,7 @@ void PatchVshMain(u32 text_addr)
 		/* FIX: wrap the disc-preview "asset needed?" check at all 12 sites to
 		   force the ICON0 load when categories are hidden. */
 		DiscAssetNeeded = (int (*)(void *, int))(text_addr + 0x26334);
+		ClearDiscAsset = (int (*)(void *, int))(text_addr + 0x290B4);
 		MAKE_CALL(text_addr + 0x1aae0, DiscAssetNeededWrap);
 		MAKE_CALL(text_addr + 0x1ab34, DiscAssetNeededWrap);
 		MAKE_CALL(text_addr + 0x1ac84, DiscAssetNeededWrap);
