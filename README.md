@@ -2,7 +2,7 @@
 
 <i>Continuation of Frostegater's project: <a href="https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP" target="_blank">https://www.gamebrew.org/wiki/XMB_Item_Hider_PSP</a></i>
 
-XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). The biggest appeal is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories. _**(Hiding any other categories beyond those 2 introduces bugs, but is mostly stable — see below for the full bug list.)**_
+XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). One of the biggest appeals is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories.
 
 Tested on:
 - 6.61 ARK-4
@@ -39,8 +39,8 @@ On ARK CFW, the `Extras` category holds three injected items: `Custom Firmware S
 ## Known Bugs/Limitations:
 - You must use the below custom build of `Game Categories Lite` to retain `Game Categories Lite` functionality when XMB categories left of `Game` are hidden through `XMB Item Hider`: 
   - <a href="https://github.com/wad11656/game-categories-lite/releases/latest" target="_blank">@wad11656/game-categories-lite</a> (bundled with the <a href="https://github.com/wad11656/XMB-Item-Hider-PSP/releases/latest" target="_blank">latest Release</a>)
-- You can't completely hide the `Settings` or `Extras` categories with `HIDE_ALL_... = 2` in `xmbih.ini` — only their contents (`HIDE_ALL_... = 1`).
+- You can't completely hide the `Settings` or `Extras` categories with `HIDE_ALL_... = 2` in `xmbih.ini` — only their contents (i.e. `HIDE_ALL_... = 1`).
   - Safely hide the `Extras` category by changing your `Custom Firmware Settings` > `VSH Region` to one of the following:
 <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
 - Hiding `System Settings` with `SYSTEM = 1` or `HIDE_ALL_SETTINGS = 1` renders ARK menu items unresponsive.
-- When certain combinations of XMB categories are hidden, static UMD preview icons are missing the first time you hover on the UMD (but not on subsequent hovers).
+- When certain combinations of XMB categories are hidden, static UMD preview icons are blank the first time you hover on the UMD (but not on subsequent hovers).
