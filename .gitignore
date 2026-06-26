@@ -9,3 +9,5 @@ flahes-pspGo/
 ark_xmbctrl.dec
 vshmain_text.bin
 !release/*.prx
+# ...but the logging build is a regenerable debug artifact; don't track it
+release/xmbih-log.prx
