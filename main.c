@@ -38,6 +38,20 @@
 #include <systemctrl.h>
 #include <systemctrl_se.h>
 #include <main.h>
+#include <pspctrl.h>
+
+/* Set when the user presses any d-pad direction during boot (polled
+   directly by boot_focus_thread); stands the boot Memory-Stick park/hold
+   down so the user's own navigation is never fought. */
+static volatile int boot_user_nav = 0;
+/* True while the boot MS park/settle owns Memory-Stick parking; maybe_jump
+   stands down until it clears so its msgshare_ms re-add snaps don't fight the
+   boot park or the user's own navigation during the settle. */
+static volatile int boot_settling = 0;
+/* Latched once the cursor has actually reached Game>Memory Stick. Until then
+   the boot forces MS and ignores early input (which is forgotten on landing);
+   after it, a fresh user press releases the boot holds. */
+static volatile int boot_ms_established = 0;
 #include <kubridge.h>
 #include <string.h>
 #include <stdarg.h>
@@ -52,9 +66,6 @@ static struct {
 } cfg_store;
 
 #define set cfg_store.flags
-#ifndef XLOG_ENABLED
-#define XLOG_ENABLED 0
-#endif
 
 /*
  * Hand-rolled libc replacements. Linking against newlib's libc.a on a
@@ -155,148 +166,6 @@ long strtol(const char *s, char **end, int base)
 	return neg ? -v : v;
 }
 
-static void xlog_raw_both(const char *msg)
-{
-	SceUID fd;
-
-#if !XLOG_ENABLED
-	(void)msg;
-	return;
-#endif
-
-	fd = sceIoOpen("ms0:/xmbih.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
-	if (fd < 0)
-		return;
-
-	sceIoWrite(fd, msg, strlen(msg));
-	sceIoClose(fd);
-}
-
-
-static void xlog_append_char(char *buf, int *pos, int max, char ch)
-{
-	if (*pos < max - 1)
-		buf[(*pos)++] = ch;
-}
-
-static void xlog_append_string(char *buf, int *pos, int max, const char *s)
-{
-	if (!s)
-		s = "(null)";
-
-	while (*s)
-		xlog_append_char(buf, pos, max, *s++);
-}
-
-static void xlog_append_uint(char *buf, int *pos, int max, unsigned int value,
-	unsigned int base, int width, int zero_pad, int uppercase)
-{
-	char tmp[16];
-	int len = 0;
-	const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
-
-	if (base < 2 || base > 16)
-		return;
-
-	do {
-		tmp[len++] = digits[value % base];
-		value /= base;
-	} while (value && len < (int)sizeof(tmp));
-
-	while (len < width && len < (int)sizeof(tmp))
-		tmp[len++] = zero_pad ? '0' : ' ';
-
-	while (len > 0)
-		xlog_append_char(buf, pos, max, tmp[--len]);
-}
-
-static void xlog_append_int(char *buf, int *pos, int max, int value,
-	int width, int zero_pad)
-{
-	unsigned int magnitude;
-
-	if (value < 0) {
-		xlog_append_char(buf, pos, max, '-');
-		magnitude = (unsigned int)(-value);
-		if (width > 0)
-			width--;
-	} else {
-		magnitude = (unsigned int)value;
-	}
-
-	xlog_append_uint(buf, pos, max, magnitude, 10, width, zero_pad, 0);
-}
-
-static void xlog(const char *fmt, ...)
-{
-	char buf[256];
-	int pos = 0;
-	va_list ap;
-
-	va_start(ap, fmt);
-	while (*fmt) {
-		if (*fmt != '%') {
-			xlog_append_char(buf, &pos, sizeof(buf), *fmt++);
-			continue;
-		}
-
-		fmt++;
-		if (*fmt == '%') {
-			xlog_append_char(buf, &pos, sizeof(buf), *fmt++);
-			continue;
-		}
-
-		{
-			int zero_pad = 0;
-			int width = 0;
-
-			if (*fmt == '0') {
-				zero_pad = 1;
-				fmt++;
-			}
-			while (*fmt >= '0' && *fmt <= '9') {
-				width = (width * 10) + (*fmt - '0');
-				fmt++;
-			}
-
-			switch (*fmt) {
-				case 'd':
-					xlog_append_int(buf, &pos, sizeof(buf), va_arg(ap, int),
-						width, zero_pad);
-					break;
-				case 'u':
-					xlog_append_uint(buf, &pos, sizeof(buf), va_arg(ap, unsigned int),
-						10, width, zero_pad, 0);
-					break;
-				case 'x':
-					xlog_append_uint(buf, &pos, sizeof(buf), va_arg(ap, unsigned int),
-						16, width, zero_pad, 0);
-					break;
-				case 'X':
-					xlog_append_uint(buf, &pos, sizeof(buf), va_arg(ap, unsigned int),
-						16, width, zero_pad, 1);
-					break;
-				case 's':
-					xlog_append_string(buf, &pos, sizeof(buf), va_arg(ap, const char *));
-					break;
-				case 'c':
-					xlog_append_char(buf, &pos, sizeof(buf), (char)va_arg(ap, int));
-					break;
-				default:
-					xlog_append_char(buf, &pos, sizeof(buf), '%');
-					xlog_append_char(buf, &pos, sizeof(buf), *fmt);
-					break;
-			}
-			if (*fmt)
-				fmt++;
-		}
-	}
-	va_end(ap);
-
-	buf[pos] = 0;
-	xlog_raw_both(buf);
-}
-
 /* AddVshItem here is *not* the literal real AddVshItem; it's whatever the
    JAL at patch[1] points to right before we overwrite it. On stock firmware
    that's the real function; on ARK-5/ARK-4 it's xmbctrl's wrapper (which
@@ -357,8 +226,6 @@ static int (*TopcatSelectShiftedFunc)(void *ctx, int adjusted_topitem,
 static int (*TopcatPositionFunc)(void *obj, int topitem);
 static int (*TrackColumnIconKey)(void *atlas, int topitem, const char *icon_key);
 static int (*NetworkDispatchFunc)(void *ctx, int a1, int a2, int a3);
-static int (*ResolveIconKeyHelper)(const char *icon_key, int *out0, int *out1,
-	int *out2);
 static int (*IconGetTex)(void *buf, void *atlas, void *entry);
 static int (*EnsureIconEntryFunc)(void *ctx, void *entry);
 static int (*FinalizeIconEntryFunc)(void *ctx, void *entry, int topitem, int slot);
@@ -378,6 +245,50 @@ static int (*ClearDiscAsset)(void *ctx, int asset);
    so those removals miss them and they linger/duplicate. We wrap it to also
    remove from the shifted column. */
 static int (*RemoveMediaByRelocate)(void *ctx, int topitem, int group);
+/* paf list-view primitives reused from vshmain's UMD-insert cursor jump
+   (FUN_00022bd4). All are runtime-resolved import stubs; the native handler
+   only ever jumps to msgshare_umd items, so we reuse the same primitives to
+   jump the Game cursor to Memory Stick when it (re)appears post-boot --
+   resume from sleep re-adds it, physical reinsert too. The column's list
+   object is *(*(obj+0x360) + col*4).
+   ListSetRowFunc (0x3F378): snap the list to a row (native calls row,row).
+   list_scroll_fwd/back (0x3F230/0x3F798): one animated step; scroll speed
+   200.0f passed out-of-band in $f12. list_focus (0x3F640): settle/refresh
+   the focused entry, speed 0.0f in $f12. ListFocusCheckFunc (0x3FB90):
+   native gate before that focus refresh. */
+static int (*ListSetRowFunc)(void *list, int row, int row2);
+static int (*ListFocusCheckFunc)(void);
+/* vshmain's native "navigate top menu to (column, row)" (FUN_0002240C):
+   packs the target into ctx+0xF8 and queues the animated transition via a
+   paf deferred callback (event 0x70) -- asynchronous, executed on the UI
+   thread. This is the same call the disc-insert flow uses to focus the
+   disc's column (log-verified: nav a1=4 a2=0 a3=3 t0=5 at boot). */
+static void (*NavigateTopMenuFunc)(void *ctx, int topitem, int row);
+/* FUN_0002128C: row of the reloc-group block in a column's model (the disc
+   row when called with group 2). Used to recompute the disc-focus row after
+   column adjustment. */
+static int (*FindMediaRowFunc)(void *ctx, int topitem, int group);
+/* FindMediaRowFunc media groups (low byte of an item's relocate field): 2 =
+   disc/UMD, 7 = Memory Stick game root (msgshare_ms), 8 = System Storage
+   (ef0, "msg_em", PSP Go only). */
+#define MS_MEDIA_GROUP 7
+
+/* START_AT cold-boot hold: how many boot-slide bounces to catch before handing
+   control back. The slide clamps focus to the rightmost visible column once;
+   we release right after correcting it so the user's own navigation is never
+   fought. */
+#define START_AT_HOLD_BOUNCES 1
+static u32 list_scroll_fwd_addr;
+static u32 list_scroll_back_addr;
+static u32 list_focus_addr;
+/* paf's PROPER row snap (paf.prx FUN_0010DD1C, export nid 0xAE2B626E, not
+   imported by vshmain -- resolved straight off the loaded paf module):
+   clamps the row, sets position AND runs the list relayout + refresh. This
+   is what the bare 0x3F378 snap was missing -- snapping with it does not
+   leave the recycled cells above the viewport (ARK's injected Game items)
+   stale. */
+static u32 paf_list_setrow_addr = 0;
+static void maybe_jump_game_cursor_to_ms(SceVshItem *item, int topitem, int row);
 static int hide_top_category(int index);
 static int UmdGameSelectShiftPatched(void *ctx, int topitem);
 static volatile u32 vsh_text_addr = 0;
@@ -390,12 +301,6 @@ static volatile int icon_layout_glow_mod = -1;
 static volatile u32 icon_layout_prev2_off;
 static volatile u32 icon_layout_prev1_off;
 
-#if XLOG_ENABLED
-static volatile int network_track_probe_count;
-static volatile int network_resolve_probe_active;
-static const char *network_resolve_probe_key;
-static volatile int network_visible_prime_probe_count;
-#endif
 
 /* Used by AddVshItemFilter below (START_AT_MEMORY_STICK), but the rest of the
    feature's state is defined further down. */
@@ -409,9 +314,11 @@ int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 {
 	int adjusted_topitem = topitem;
 
+	/* Race mitigation: yield per add so our re-add/scroll below never runs
+	   ahead of vshmain's list rebuild during Settings/USB transitions. */
+	sceKernelDelayThread(15000);
+
 	if (!strcmp(item->text, "msgshare_umd")) {
-		xlog("filter umd: top=%d boot_hide=%d\n",
-			topitem, boot_hide_for_ms);
 	}
 
 	/* Items reaching us here either came from xmbctrl forwarding (the
@@ -452,7 +359,13 @@ int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 	if(skip(item, 0)) {
 		int (*trampoline)(void *, int, SceVshItem *) =
 			(int(*)(void *, int, SceVshItem *))add_vsh_trampoline;
-		return trampoline(a0, adjusted_topitem, item);
+		/* The real AddVshItem (0x22648 on 6.60) returns the row the item
+		   landed on -- the native UMD-insert jump consumes it the same way.
+		   Every add funnels through this filter, so this is the one spot
+		   that reliably sees Memory Stick (re)appear in the Game column. */
+		int row = trampoline(a0, adjusted_topitem, item);
+		maybe_jump_game_cursor_to_ms(item, adjusted_topitem, row);
+		return row;
 	}
 	return 0;
 }
@@ -490,9 +403,11 @@ static volatile u32 scene_ctx = 0;
    AddVshItem, once the XMB is ready. */
 static SceVshItem captured_gamedl;
 static SceVshItem captured_savedata;
+static SceVshItem captured_savedata_ef;    /* PSP Go: System Storage (ef0) Saved Data Utility */
 static SceVshItem captured_umd;            /* inserted UMD disc (msgshare_umd) */
 static volatile int gamedl_captured = 0;
 static volatile int savedata_captured = 0;
+static volatile int savedata_ef_captured = 0;
 static volatile int umd_captured = 0;
 /* captured_ark[] / captured_ark_count moved up (used by AddVshItemFilter). When
    ARK CFW items are rerouted into Game, they land ahead of Memory Stick and
@@ -513,11 +428,8 @@ static volatile int boot_umd_defer_active = 0;
 static volatile int boot_umd_defer_captured = 0;
 static volatile int boot_umd_defer_thread_started = 0;
 static int top_category_hidden_count;
-static int top_category_count_logged;
 static u32 top_category_runtime_obj;
-static int top_category_runtime_return_override_logged;
 static SceUID power_callback_uid = -1;
-static int power_callback_slot = -1;
 static SceUID power_callback_thread_uid = -1;
 static SceUID media_watch_thread_uid = -1;
 static SceUID umd_callback_uid = -1;
@@ -530,49 +442,42 @@ static volatile int seen_game_umd_items = 0;
 static volatile u32 suppress_umd_adds_until = 0;
 static volatile int last_ms_inserted_state = -2;
 static volatile int last_usb_state = -1;
+/* Wake park (START_AT_MEMORY_STICK): the Memory Stick row cannot be found
+   by walking vshmain's item lists -- with Categories Lite the visible MS
+   entry is CL's own item ("gcN"/Uncategorized), and the media plugins add
+   their cells straight into the paf widget without a vshmain-side node,
+   so no vshmain structure maps display rows completely. Instead use the
+   invariant the boot park gives us for free: once the boot replay has
+   settled, the cursor IS on Memory Stick, so its display row can simply
+   be sampled (ms_boot_row). The post-resume worker scrolls back to that
+   row after the wake re-adds settle -- the column converges to the same
+   boot layout, so the row is the same. */
+static volatile int ms_boot_row = -1;
+static volatile int wake_park_thread_running = 0;
+/* While nonzero, the disc-focus navigate is redirected to Game>Memory Stick
+   when START_AT_MEMORY_STICK is set: armed for ~45s at boot and ~15s on
+   resume, so the native Video>UMD jump can't steal the park in those
+   windows -- but a disc hot-inserted mid-session still jumps natively. */
+static volatile u32 ms_park_redirect_until = 0;
+/* Latched once the user deliberately navigates to another column during the
+   disc-focus redirect window: after that, later disc re-registrations must NOT
+   yank the cursor back to Game (reset when the window is re-armed at boot/wake). */
+static volatile int user_left_game_during_redirect = 0;
+static int wake_park_thread(SceSize args, void *argp);
+/* Boot category focus: with categories hidden left of Game, the stock boot
+   slide targets native Game=5 resolved against the compacted layout and
+   lands clamped on the rightmost visible category; when a disc is present
+   the disc-focus (FUN_0002240C) also fires and the two RACE -- boot ends on
+   whichever ran last (both observed on hardware). This thread re-asserts
+   Game via the same native navigate call after the race settles. Runs
+   whenever categories are compacted, regardless of START_AT_MEMORY_STICK
+   (stock boots into Game; this just restores that). */
+static volatile int boot_focus_thread_started = 0;
+static int boot_focus_thread(SceSize args, void *argp);
 
 static int path_is_dir(const char *path);
 static int current_umd_is_video(void);
 static int preferred_umd_location(const char *text);
-
-static void xlog_scene_state(const char *tag)
-{
-	u32 obj = 0;
-	u32 arr330 = 0;
-
-#if !XLOG_ENABLED
-	(void)tag;
-	return;
-#endif
-
-	if (scene_ctx)
-		obj = *(u32 *)(scene_ctx + 0xA6C);
-
-	if (obj)
-		arr330 = *(u32 *)(obj + 0x330);
-
-	xlog("scene[%s]: ctx=0x%08X obj=0x%08X hidden=%d boot_hide=%d start_ms=%d game_idx=%d captured=%d/%d/%d ark=%d\n",
-		tag, (u32)scene_ctx, obj, top_category_hidden_count, boot_hide_for_ms,
-		start_at_ms_flag, start_ms_game_index, gamedl_captured,
-		savedata_captured, umd_captured, captured_ark_count);
-
-	if (!obj)
-		return;
-
-	xlog("scene[%s]: 330=0x%08X 334=%d 338=%d 33C=%d 340=%d 344=%d 348=%d 34C=%d 350=%d 354=%d 358=%d 35C=%d\n",
-		tag, arr330, *(int *)(obj + 0x334), *(int *)(obj + 0x338),
-		*(int *)(obj + 0x33C), *(int *)(obj + 0x340), *(int *)(obj + 0x344),
-		*(int *)(obj + 0x348), *(int *)(obj + 0x34C), *(int *)(obj + 0x350),
-		*(int *)(obj + 0x354), *(int *)(obj + 0x358), *(int *)(obj + 0x35C));
-
-	if (arr330) {
-		xlog("scene[%s]: arr330[%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X]\n",
-			tag, *(u32 *)(arr330 + 0x00), *(u32 *)(arr330 + 0x04),
-			*(u32 *)(arr330 + 0x08), *(u32 *)(arr330 + 0x0C),
-			*(u32 *)(arr330 + 0x10), *(u32 *)(arr330 + 0x14),
-			*(u32 *)(arr330 + 0x18), *(u32 *)(arr330 + 0x1C));
-	}
-}
 
 static int media_duplicate_risk_active(void)
 {
@@ -585,22 +490,20 @@ static int media_duplicate_risk_active(void)
 	       hide_top_category(4);
 }
 
-static void arm_media_readd_suppression(volatile u32 *until, u32 duration_us, const char *tag)
+static void arm_media_readd_suppression(volatile u32 *until, u32 duration_us)
 {
 	if (!media_duplicate_risk_active())
 		return;
 
 	*until = sceKernelGetSystemTimeLow() + duration_us;
-	xlog("%s: suppress window %u us\n", tag, duration_us);
 }
 
-static void arm_game_ms_readd_suppression(const char *tag)
+static void arm_game_ms_readd_suppression(void)
 {
 	if (!media_duplicate_risk_active() || !scene_ctx)
 		return;
 
 	suppress_next_game_ms_add = 1;
-	xlog("%s: suppress next game ms add\n", tag);
 }
 
 static int first_visible_media_location_after_settings(void)
@@ -648,7 +551,7 @@ static int leading_ms_duplicate_risk_active(void)
 	return location >= 1 && location <= 3;
 }
 
-static void arm_leading_ms_readd_suppression(const char *tag)
+static void arm_leading_ms_readd_suppression(void)
 {
 	int location;
 
@@ -657,7 +560,6 @@ static void arm_leading_ms_readd_suppression(const char *tag)
 
 	location = first_visible_media_location_after_settings();
 	suppress_next_leading_ms_add = location;
-	xlog("%s: suppress next leading ms add loc=%d\n", tag, location);
 }
 
 static int leading_umd_duplicate_risk_active(void)
@@ -679,12 +581,11 @@ static int should_suppress_umd_select_route(int topitem)
 	return 0;
 }
 
-static void reset_leading_umd_seen(const char *tag)
+static void reset_leading_umd_seen(void)
 {
 	if (!seen_leading_video_umd)
 		return;
 
-	xlog("%s: clear seen leading video umd=%d\n", tag, seen_leading_video_umd);
 	seen_leading_video_umd = 0;
 }
 
@@ -750,24 +651,21 @@ static int current_umd_is_video(void)
 	return 0;
 }
 
-static void reset_game_umd_seen(const char *tag)
+static void reset_game_umd_seen(void)
 {
 	if (!seen_game_umd_items)
 		return;
 
-	xlog("%s: clear seen game umd mask=0x%X\n", tag, seen_game_umd_items);
 	seen_game_umd_items = 0;
 }
 
-static void arm_game_umd_readd_suppression(const char *tag, int count)
+static void arm_game_umd_readd_suppression(int count)
 {
 	if (!media_duplicate_risk_active() || !scene_ctx || count <= 0)
 		return;
 
 	if (suppress_next_game_umd_adds < count)
 		suppress_next_game_umd_adds = count;
-	xlog("%s: suppress next game umd adds=%d\n", tag,
-		suppress_next_game_umd_adds);
 }
 
 static int maybe_suppress_media_readd(SceVshItem *item, int location, int topitem)
@@ -793,8 +691,6 @@ static void mark_boot_umd_replay_seen(int topitem)
 
 	seen_game_umd_items |= game_umd_item_mask("msgshare_umd", 3) |
 	                       game_umd_item_mask("msgshare_umd", 4);
-	xlog("boot_umd: mark seen umd top=%d mask=0x%X\n",
-		topitem, seen_game_umd_items);
 }
 
 /* The boot replay re-adds the captured UMD via AddVshItem directly, which
@@ -806,82 +702,6 @@ static int boot_umd_already_present(void)
 	return (seen_game_umd_items &
 	        (game_umd_item_mask("msgshare_umd", 3) |
 	         game_umd_item_mask("msgshare_umd", 4))) != 0;
-}
-
-static void log_msgshare_ms_add(const char *source, int location, int topitem)
-{
-	xlog("%s msgshare_ms: loc=%d top=%d game_top=%d video_hidden=%d ms_inserted=%d usb=0x%X suppress_next=%d now=%u\n",
-		source,
-		location,
-		topitem,
-		adjust_topitem_for_hidden_categories(5),
-		hide_top_category(4),
-		MScmIsMediumInserted(),
-		sceUsbGetState(),
-		suppress_next_game_ms_add,
-		sceKernelGetSystemTimeLow());
-}
-
-static int is_network_item_text(const char *text)
-{
-	return !strcmp(text, "msg_onlinemanual") ||
-	       !strcmp(text, "msgtop_network_lftv") ||
-	       !strcmp(text, "msg_skype") ||
-	       !strcmp(text, "msg_ps3_connection") ||
-	       !strcmp(text, "msg_internetradio") ||
-	       !strcmp(text, "msgtop_network_rss") ||
-	       !strcmp(text, "msgtop_network_browser") ||
-	       !strcmp(text, "msg_internet_search") ||
-	       !strcmp(text, "msg_psspot") ||
-	       !strcmp(text, "msg_gomessenger");
-}
-
-/* Items from columns that shift left under compaction, used to compare a
-   working shifted column (Game/PSN) against the blank Network one. */
-static int is_icon_debug_item(const char *text)
-{
-	return is_network_item_text(text) ||
-	       !strcmp(text, "msgtop_game_gamedl") ||
-	       !strcmp(text, "msgtop_game_savedata") ||
-	       !strcmp(text, "msg_game_hibernation") ||
-	       !strcmp(text, "msg_signup") ||
-	       !strcmp(text, "msg_ps_store") ||
-	       !strcmp(text, "msg_information_board") ||
-	       !strcmp(text, "msgshare_umd");
-}
-
-static void log_network_item_add(const char *source, int location, int incoming_topitem,
-	int adjusted_topitem, SceVshItem *item)
-{
-	u32 obj = 0;
-	int current_top = -1;
-
-	if (!is_icon_debug_item(item->text))
-		return;
-
-	if (scene_ctx)
-		obj = *(u32 *)(scene_ctx + 0xA6C);
-	if (obj)
-		current_top = *(int *)(obj + 0x338);
-
-	/* Dump every field that could drive the per-item icon/plane lookup so a
-	   blank Network item can be compared to a rendering Game/PSN item. */
-	xlog("icon dump %s: text='%s' loc=%d top=%d adj=%d cur=%d id=%d reloc=%d act=%d arg=%d ctx=0x%08X sub=0x%08X img='%s' sh='%s' glow='%s'\n",
-		source,
-		item->text,
-		location,
-		incoming_topitem,
-		adjusted_topitem,
-		current_top,
-		item->id,
-		item->relocate,
-		item->action,
-		item->action_arg,
-		(u32)item->context,
-		(u32)item->subtitle,
-		item->image,
-		item->image_shadow,
-		item->image_glow);
 }
 
 static int should_preserve_network_topitem(int incoming_topitem, int adjusted_topitem,
@@ -922,62 +742,20 @@ static int TrackColumnIconKeyPatched(void *ctx, int topitem, const char *icon_ke
 		if (count_hidden_top_categories_before(native_network_topitem) > 0 &&
 		    topitem == adjust_topitem_for_hidden_categories(native_network_topitem)) {
 			tracked_topitem = native_network_topitem;
-			xlog("network icon track remap: key='%s' top=%d track=%d\n",
-				icon_key, topitem, tracked_topitem);
 		}
 	}
 
-#if XLOG_ENABLED
-	if (tracked_topitem == 6 &&
-	    count_hidden_top_categories_before(6) > 0) {
-		network_resolve_probe_active = 1;
-		network_resolve_probe_key = icon_key;
-	}
-#endif
 
 	ret = TrackColumnIconKey(ctx, tracked_topitem, icon_key);
 
-#if XLOG_ENABLED
-	if (tracked_topitem == 6 &&
-	    count_hidden_top_categories_before(6) > 0 &&
-	    vsh_text_addr &&
-	    network_track_probe_count < 16) {
-		int count_a = *(int *)(vsh_text_addr + 0x7330);
-		int *queue_a = (int *)(vsh_text_addr + 0x72D8);
-		int count_b = *(int *)(vsh_text_addr + 0x7334);
-		int *queue_b = (int *)(vsh_text_addr + 0x7310);
-
-		xlog("network track state: key='%s' ret=%d A(count=%d q=%d,%d,%d,%d,%d,%d,%d,%d) B(count=%d q=%d,%d,%d,%d,%d,%d,%d,%d)\n",
-			icon_key, ret,
-			count_a,
-			queue_a[0], queue_a[1], queue_a[2], queue_a[3],
-			queue_a[4], queue_a[5], queue_a[6], queue_a[7],
-			count_b,
-			queue_b[0], queue_b[1], queue_b[2], queue_b[3],
-			queue_b[4], queue_b[5], queue_b[6], queue_b[7]);
-		network_track_probe_count++;
-	}
-	network_resolve_probe_active = 0;
-	network_resolve_probe_key = 0;
-#endif
 	return ret;
 }
 
 static int power_callback(int unknown, int powerInfo, void *arg)
 {
 	(void)arg;
+	sceKernelDelayThread(15000);   /* race mitigation */
 
-	xlog("power: cb unk=%d info=0x%08X\n", unknown, powerInfo);
-	if (powerInfo & PSP_POWER_CB_SUSPENDING)
-		xlog_scene_state("suspending");
-	if (powerInfo & PSP_POWER_CB_RESUMING)
-		xlog_scene_state("resuming");
-	if (powerInfo & PSP_POWER_CB_RESUME_COMPLETE)
-		xlog_scene_state("resume_complete");
-	if (powerInfo & PSP_POWER_CB_STANDBY)
-		xlog("power: standby flag set\n");
-	if (powerInfo & PSP_POWER_CB_POWER_SWITCH)
-		xlog("power: power-switch flag set\n");
 	if (powerInfo & (PSP_POWER_CB_RESUMING | PSP_POWER_CB_RESUME_COMPLETE)) {
 		/* Do NOT reset_game_umd_seen() on resume. A sleep/wake keeps the
 		   existing UMD entry in its column (the disc never changed), but vshmain
@@ -988,11 +766,40 @@ static int power_callback(int unknown, int powerInfo, void *arg)
 		   suppress_next_game_ms_add persisting across resume. A genuine disc
 		   change still clears the mask via reset_game_umd_seen() in
 		   umd_callback(). */
-		arm_leading_ms_readd_suppression("power lead ms");
-		arm_game_ms_readd_suppression("power ms");
-		arm_media_readd_suppression(&suppress_umd_adds_until, 3000000, "power umd");
+		arm_leading_ms_readd_suppression();
+		arm_game_ms_readd_suppression();
+		arm_media_readd_suppression(&suppress_umd_adds_until, 3000000);
 		if (sceUmdCheckMedium() > 0)
-			arm_game_umd_readd_suppression("power game umd", 2);
+			arm_game_umd_readd_suppression(2);
+	}
+	/* Don't yank the cursor to Game>Memory Stick on wake while a submenu /
+	   context menu is open -- that strands the overlay (the user can't dismiss
+	   it). scene_ctx+0x14C's bit 0 is vshmain's "bare XMB is the foreground"
+	   flag: SET (…0001) while resting on a plain column, CLEAR (…0000) while a
+	   submenu, context menu, Settings sub-page, or applet is up (hardware-diffed
+	   awake AND at wake; it reverts on close -- unlike the 0xE2C counter, and it
+	   covers more than the narrower 0x128 submenu flag). Skip the wake park
+	   while an overlay is up; a normal wake parks as usual. NOTE: ARK CFW's own
+	   custom menus (e.g. its Update menu) are NOT vshmain overlays and don't
+	   clear this bit, so they're not covered here. */
+	if (powerInfo & PSP_POWER_CB_RESUME_COMPLETE)
+	if ((powerInfo & PSP_POWER_CB_RESUME_COMPLETE) && start_at_ms_flag &&
+	    !wake_park_thread_running &&
+	    !(scene_ctx && !(*(u32 *)((char *)scene_ctx + 0x14C) & 1))) {
+		SceUID tid = sceKernelCreateThread("xmbih_wakepark",
+			wake_park_thread, 0x18, 0x1000, 0, NULL);
+		/* Same disc-present gate as the boot window: only a disc that is
+		   in the drive AT WAKE has its re-registrations redirected; a
+		   disc inserted after a disc-less wake jumps natively. */
+		if (sceUmdCheckMedium() > 0) {
+			ms_park_redirect_until =
+				sceKernelGetSystemTimeLow() + 15000000;
+			user_left_game_during_redirect = 0;
+		}
+		if (tid >= 0) {
+			wake_park_thread_running = 1;
+			sceKernelStartThread(tid, 0, NULL);
+		}
 	}
 
 	return 0;
@@ -1003,12 +810,11 @@ static int umd_callback(int unknown, int event, void *arg)
 	(void)unknown;
 	(void)arg;
 
-	xlog("umd cb: event=0x%08X\n", event);
 	if (event & (PSP_UMD_NOT_PRESENT | PSP_UMD_CHANGED)) {
-		reset_leading_umd_seen("umd lead");
-		reset_game_umd_seen("umd game");
-		arm_media_readd_suppression(&suppress_umd_adds_until, 3000000, "umd");
-		arm_game_umd_readd_suppression("umd game", 2);
+		reset_leading_umd_seen();
+		reset_game_umd_seen();
+		arm_media_readd_suppression(&suppress_umd_adds_until, 3000000);
+		arm_game_umd_readd_suppression(2);
 	}
 
 	return 0;
@@ -1016,22 +822,17 @@ static int umd_callback(int unknown, int event, void *arg)
 
 static int ms_callback(int unknown, int event, void *arg)
 {
+	sceKernelDelayThread(15000);   /* race mitigation */
 	(void)unknown;
 	(void)arg;
 
-	xlog("ms cb: event=%d inserted=%d usb=0x%X suppress_next=%d now=%u\n",
-		event,
-		MScmIsMediumInserted(),
-		sceUsbGetState(),
-		suppress_next_game_ms_add,
-		sceKernelGetSystemTimeLow());
 	if (event == MS_CB_EVENT_EJECTED) {
-		arm_leading_ms_readd_suppression("ms eject lead");
-		arm_game_ms_readd_suppression("ms eject");
+		arm_leading_ms_readd_suppression();
+		arm_game_ms_readd_suppression();
 	}
 	else if (event == MS_CB_EVENT_INSERTED) {
-		arm_leading_ms_readd_suppression("ms insert lead");
-		arm_game_ms_readd_suppression("ms insert");
+		arm_leading_ms_readd_suppression();
+		arm_game_ms_readd_suppression();
 	}
 
 	return 0;
@@ -1048,27 +849,25 @@ static int media_watch_thread(SceSize args, void *argp)
 		int usb_drop = (last_usb_state != 0x221 && usb_state == 0x221);
 		int usb_rise = (last_usb_state == 0x221 && usb_state != 0x221);
 		if (inserted != last_ms_inserted_state || usb_state != last_usb_state) {
-			xlog("ms poll: inserted=%d usb=0x%X prev_inserted=%d prev_usb=0x%X\n",
-				inserted, usb_state, last_ms_inserted_state, last_usb_state);
 		}
 
 		if (last_ms_inserted_state >= -1 && inserted != last_ms_inserted_state) {
 			if (inserted <= 0) {
-				arm_leading_ms_readd_suppression("ms poll eject lead");
-				arm_game_ms_readd_suppression("ms poll eject");
+				arm_leading_ms_readd_suppression();
+				arm_game_ms_readd_suppression();
 			}
 			else {
-				arm_leading_ms_readd_suppression("ms poll insert lead");
-				arm_game_ms_readd_suppression("ms poll insert");
+				arm_leading_ms_readd_suppression();
+				arm_game_ms_readd_suppression();
 			}
 		}
 		else if (scene_ctx && inserted > 0 && usb_drop) {
-			arm_leading_ms_readd_suppression("ms usb drop lead");
-			arm_game_ms_readd_suppression("ms usb drop");
+			arm_leading_ms_readd_suppression();
+			arm_game_ms_readd_suppression();
 		}
 		else if (scene_ctx && inserted > 0 && usb_rise) {
-			arm_leading_ms_readd_suppression("ms usb rise lead");
-			arm_game_ms_readd_suppression("ms usb rise");
+			arm_leading_ms_readd_suppression();
+			arm_game_ms_readd_suppression();
 		}
 
 		last_ms_inserted_state = inserted;
@@ -1088,15 +887,10 @@ static int power_callback_thread(SceSize args, void *argp)
 
 	power_callback_uid = sceKernelCreateCallback("xmbih_power", power_callback, NULL);
 	if (power_callback_uid < 0) {
-		xlog("power: sceKernelCreateCallback failed 0x%08X\n",
-			(unsigned int)power_callback_uid);
 		return 0;
 	}
 
 	slot = scePowerRegisterCallback(-1, power_callback_uid);
-	power_callback_slot = slot;
-	xlog("power: register callback uid=0x%08X slot=%d\n",
-		(unsigned int)power_callback_uid, slot);
 	if (slot < 0)
 		return 0;
 
@@ -1114,7 +908,7 @@ static int power_callback_thread(SceSize args, void *argp)
 	return 0;
 }
 
-static void start_power_debugging(void)
+static void start_power_callbacks(void)
 {
 	if (power_callback_thread_uid >= 0)
 		return;
@@ -1127,14 +921,10 @@ static void start_power_debugging(void)
 		0,
 		NULL);
 	if (power_callback_thread_uid < 0) {
-		xlog("power: sceKernelCreateThread failed 0x%08X\n",
-			(unsigned int)power_callback_thread_uid);
 		return;
 	}
 
 	sceKernelStartThread(power_callback_thread_uid, 0, NULL);
-	xlog("power: callback thread uid=0x%08X started\n",
-		(unsigned int)power_callback_thread_uid);
 
 	if (media_watch_thread_uid >= 0)
 		return;
@@ -1147,14 +937,10 @@ static void start_power_debugging(void)
 		0,
 		NULL);
 	if (media_watch_thread_uid < 0) {
-		xlog("media: sceKernelCreateThread failed 0x%08X\n",
-			(unsigned int)media_watch_thread_uid);
 		return;
 	}
 
 	sceKernelStartThread(media_watch_thread_uid, 0, NULL);
-	xlog("media: watcher thread uid=0x%08X started\n",
-		(unsigned int)media_watch_thread_uid);
 }
 
 static int should_defer_boot_umd_add(void)
@@ -1196,8 +982,6 @@ static int boot_umd_readd_thread(SceSize args, void *argp)
 	boot_umd_defer_active = 0;
 	if (boot_umd_defer_captured && boot_umd_a0) {
 		if (boot_umd_already_present()) {
-			xlog("boot_umd: replay skipped, already present top=%d\n",
-				boot_umd_topitem);
 		} else {
 			mark_boot_umd_replay_seen(boot_umd_topitem);
 			AddVshItem((void *)boot_umd_a0, boot_umd_topitem, &captured_umd);
@@ -1221,7 +1005,6 @@ static int maybe_defer_boot_umd_add(void *a0, int topitem, SceVshItem *item)
 	boot_umd_a0 = a0;
 	boot_umd_topitem = topitem;
 	boot_umd_defer_captured = 1;
-	xlog("boot_umd: deferred initial add top=%d\n", topitem);
 
 	if (!boot_umd_defer_thread_started) {
 		boot_umd_defer_thread_started = 1;
@@ -1270,7 +1053,7 @@ static void maybe_disable_start_at_ms_for_movie_boot(SceVshItem *item, int locat
 	   target break whenever a disc is inserted. */
 }
 
-static void refresh_current_game_top_after_replay(const char *tag)
+static void refresh_current_game_top_after_replay(void)
 {
 	u32 obj = 0;
 
@@ -1284,9 +1067,770 @@ static void refresh_current_game_top_after_replay(const char *tag)
 	if (*(int *)(obj + 0x338) != game_topitem)
 		return;
 
-	xlog("%s: refresh current game top native=5 shown=%d ctx=0x%08X\n",
-		tag, game_topitem, (u32)scene_ctx);
+	/* Don't run the select if we're returning from a crashed game (ctx+0xE74
+	   set, error dialog up) -- it would resume the XMB behind the dialog.
+	   Same guard as xmb_interactive(), inlined (defined later). */
+	if (*(unsigned char *)((char *)scene_ctx + 0xE74)) {
+		return;
+	}
+
 	UmdGameSelectShiftPatched((void *)scene_ctx, 5);
+}
+
+/* The paf scroll/settle functions take their speed as a float in $f12, out of
+   band from the integer args (mtc1 at the native callsites). Loading $f12
+   right before the call is safe here: no float code in between for GCC to
+   schedule against, and volatile asm keeps its order relative to calls. */
+static void set_f12(u32 bits)
+{
+	asm volatile("mtc1 %0, $f12" : : "r"(bits));
+}
+
+/* True when it is safe for our async ops (navigate / scroll / select) to
+   touch the XMB. The one case where it is NOT is right after a game crashes
+   back to the XMB: a bad EBOOT ("The game could not be started (8002013C)")
+   leaves an error dialog up and re-runs our START_AT boot machinery, whose
+   navigate/select would resume the XMB behind the still-open modal and hand
+   it input (circle stops closing the dialog).
+
+   Discriminator: ctx+0xE74 is vshmain's game-launch-context byte -- set to 1
+   by the game-launch teardown (FUN_00020368 / FUN_0001D518, which also wipe
+   the media columns and stash the launcher id at 0xe78). After a crash-back
+   it is still 1 while the dialog is up; on a genuine cold boot or a normal
+   sleep/wake it is 0. (Hardware-confirmed: the vanilla config, where no
+   START_AT machinery runs, has no bug; and the XMB render refcount
+   DAT_00006198 was ruled out -- it reads 1 in both states.) So: act only
+   when NOT returning from a game. */
+static int xmb_interactive(void)
+{
+	if (!scene_ctx)
+		return 0;
+
+	if (*(unsigned char *)((char *)scene_ctx + 0xE74)) {
+		return 0;
+	}
+	return 1;
+}
+
+/* When set, scroll_game_col_to_row moves row-by-row via the native single-step
+   animation instead of the bulk paf snap. The snap bulk-relayouts the list and
+   skips vshmain's per-row focus update, so a preview bound to the row we leave
+   (Game>Resume Game's screenshot) is stranded as a ghost and the icons never
+   get their render pass. Stepping fires the same focus update a d-pad press
+   does, tearing the old preview down and rendering as it goes. Used by the wake
+   park (small moves); boot / re-add keep the snap. */
+static int scroll_step_only = 0;
+
+/* Scroll the Game column's paf list to a row, mirroring the native
+   UMD-insert jump (FUN_00022bd4): snap when 2+ rows away, animate the last
+   step at the native 200.0f speed, settle the focused entry when Game is
+   the current column. dispcol is Game's DISPLAYED index. */
+static void scroll_game_col_to_row(int dispcol, int row)
+{
+	u32 obj, arr, list;
+	int cur, i;
+
+	/* Race mitigation: this walks and pokes the live per-column list via paf.
+	   If it runs while vshmain is rebuilding that list (e.g. entering Bluetooth
+	   device settings, USB-mode exit), it can touch half-built state and crash.
+	   Small yields here let the rebuild settle first -- confirmed on hardware
+	   (the crash only reproduces without them). */
+	sceKernelDelayThread(15000);
+	if (row < 0 || row > 31)
+		return;
+	if (!scene_ctx || !ListSetRowFunc || !TopcatPositionFunc)
+		return;
+	if (!xmb_interactive())
+		return;          /* dialog up / XMB suspended: don't touch it */
+
+	obj = *(u32 *)(scene_ctx + 0xA6C);
+	if (!obj)
+		return;
+	arr = *(u32 *)(obj + 0x360);
+	if (!arr)
+		return;
+	list = *(u32 *)(arr + dispcol * 4);
+	if (!list)
+		return;
+	sceKernelDelayThread(15000);   /* race mitigation (see top of function) */
+
+	cur = TopcatPositionFunc((void *)obj, dispcol);
+	sceKernelDelayThread(15000);   /* race mitigation (see top of function) */
+	if (cur == row)
+		return;          /* already parked; keep re-checks free */
+	{
+		/* Multi-row moves SNAP via paf's set-row-with-relayout (see
+		   paf_list_setrow_addr): unlike the bare 0x3F378 snap that left
+		   ARK's cells stale, this one relays the list natively -- no
+		   dpad-walk feel. Adjacent moves keep the native single-step
+		   animation. The step loops below double as verification and
+		   fallback: if the snap landed, they no-op. */
+		if (!scroll_step_only && paf_list_setrow_addr &&
+		    (cur - row < -1 || cur - row > 1))
+			((void (*)(void *, int))paf_list_setrow_addr)(
+				(void *)list, row);
+		for (i = 0; i < 24; i++) {
+			if (TopcatPositionFunc((void *)obj, dispcol) >= row)
+				break;
+			set_f12(0x43480000);   /* 200.0f, native scroll speed */
+			((int (*)(void *, int))list_scroll_fwd_addr)((void *)list, 0);
+		}
+		for (i = 0; i < 24; i++) {
+			if (TopcatPositionFunc((void *)obj, dispcol) <= row)
+				break;
+			set_f12(0x43480000);
+			((int (*)(void *, int))list_scroll_back_addr)((void *)list, 0);
+		}
+	}
+
+	if (*(int *)(obj + 0x338) == dispcol &&
+	    ListFocusCheckFunc && ListFocusCheckFunc()) {
+		set_f12(0);            /* 0.0f: settle instantly */
+		((int (*)(void *))list_focus_addr)((void *)list);
+	}
+}
+
+/* Read the SceVshItem sitting at display row `row` of top column `col` by
+   walking vshmain's own per-column item list -- the same structure the real
+   AddVshItem (0x22648) walks: sentinel pointer at ctx + col*0xC + 0xE88, nodes
+   linked at +4, node's SceVshItem at +8. Every pointer is range-checked to PSP
+   user RAM before deref, so a wrong base/index just yields NULL (caller falls
+   back to the snap) rather than risking a wake-time crash. */
+static SceVshItem *game_row_item_at(int col, int row)
+{
+	u32 sent, node;
+	int i;
+
+	if (!scene_ctx || col < 0 || row < 0)
+		return 0;
+	/* sentinel NODE (per AddVshItem @0x22660); first real node is sent->next
+	   (+4); node's SceVshItem at +8; list is circular (ends back at sent). */
+	/* VALID_PTR: aligned and, ignoring the cached/uncached mirror bits
+	   (& 0x1FFFFFFF), inside PSP user RAM. Upper bound is 0x0C800000 -- the
+	   Go/2000/3000 have 64MB (real sentinels land at ~0x0A00xxxx), so the old
+	   32MB cap of 0x0A000000 wrongly rejected them. Accepts 0x088. (cached)
+	   and 0x488. (uncached). */
+#define VALID_PTR(p) (((p) & 3) == 0 && ((p) & 0x1FFFFFFF) >= 0x08000000 \
+	&& ((p) & 0x1FFFFFFF) < 0x0C800000)
+	sent = *(u32 *)(scene_ctx + (u32)col * 0xC + 0xE88);
+	if (!VALID_PTR(sent))
+		return 0;
+	node = *(u32 *)(sent + 4);
+	for (i = 0; i <= row && i < 64; i++) {
+		if (!VALID_PTR(node))
+			return 0;
+		if (node == sent)   /* wrapped past the last item: row out of range */
+			return 0;
+		if (i == row) {
+			u32 item = *(u32 *)(node + 8);
+			if (!VALID_PTR(item))
+				return 0;
+			return (SceVshItem *)item;
+		}
+		node = *(u32 *)(node + 4);
+	}
+	return 0;
+#undef VALID_PTR
+}
+
+/* Is the Game-column item at `row` the suspended-game "Resume Game" entry?
+   Its text id isn't in vshmain's strings and it persists across sleep (never
+   re-added), so we read it live off the list and match the id. A miss just
+   returns 0. */
+static int game_row_is_resume(int col, int row)
+{
+	SceVshItem *it = game_row_item_at(col, row);
+
+	if (!it)
+		return 0;
+	/* Confirmed on hw: the suspended-game "Resume Game" entry is
+	   msg_game_hibernation (id 30, relocate low byte 0x06). */
+	if (!strcmp(it->text, "msg_game_hibernation"))
+		return 1;
+	return 0;
+}
+
+
+/* START_AT_MEMORY_STICK: park the Game cursor back on Memory Stick whenever
+   the msgshare_ms item (re)appears in the Game column after boot. Sleep/wake
+   ejects the MS/UMD entries and re-adds them on resume, which left the cursor
+   wherever it was; a physical MS reinsert behaves the same. Mirrors the
+   native UMD-insert jump (FUN_00022bd4): AddVshItem already returned the row
+   the item landed on, so snap the paf list there when it's 2+ rows away,
+   animate the last step at the native 200.0f speed, and settle the focused
+   entry when Game is the current column. When another column is current, the
+   reposition happens in the background, same as the boot-time park. Runs on
+   vshmain's own thread (called from the AddVshItem funnel), the same context
+   the native handler uses. Boot-walk adds are excluded: boot_hide_for_ms is
+   still set then, and the boot path parks the cursor by hiding the items
+   before Memory Stick instead. */
+static void maybe_jump_game_cursor_to_ms(SceVshItem *item, int topitem, int row)
+{
+	if (!start_at_ms_flag || boot_hide_for_ms)
+		return;
+	if (strcmp(item->text, "msgshare_ms"))
+		return;
+	sceKernelDelayThread(15000);   /* race mitigation: let the re-add settle */
+
+	/* A genuine MS (re)insert landing in GAME's displayed column: park on
+	   the boot-sampled Memory Stick row (see ms_boot_row above). */
+	if (topitem != adjust_topitem_for_hidden_categories(5)) {
+		return;
+	}
+
+	/* During the wake window the wake worker owns Memory-Stick parking: it waits
+	   for the shifting column to settle, then snaps once by identity. A
+	   concurrent maybe_jump snap by ROW NUMBER lands on whatever transiently
+	   occupies that row (System Storage, Resume Game) and fights the worker --
+	   so stand down while it runs. maybe_jump still handles physical MS
+	   reinserts when the worker isn't active. */
+	if (wake_park_thread_running) {
+		return;
+	}
+
+	/* The boot MS park/settle (start_at_ms_thread) owns Memory-Stick parking
+	   during boot; stand down until it's done so re-adds during the settle
+	   don't yank the cursor (or fight the user's navigation) back to MS.
+	   maybe_jump resumes afterward for post-boot physical MS reinserts. */
+	if (boot_settling) {
+		return;
+	}
+
+	/* Don't scroll off an open overlay/preview (e.g. Game>Resume Game restored
+	   on wake): the MS re-add fires while the cursor is still on Resume Game,
+	   and scrolling away leaves its preview stranded as a ghost. 0x14C bit0
+	   clear = something is up -- leave the cursor put. (Boot is unaffected:
+	   boot_hide_for_ms is still set then and returned above.) */
+	if (scene_ctx && !(*(u32 *)((char *)scene_ctx + 0x14C) & 1)) {
+		return;
+	}
+
+	{
+		/* Park onto Memory Stick by IDENTITY (group 7 = msgshare_ms just
+		   added), not the stale boot row number: during boot/settle the row
+		   shifts, so a fixed row lands on whatever now sits there. */
+		int msr = FindMediaRowFunc ?
+			FindMediaRowFunc((void *)scene_ctx, topitem, MS_MEDIA_GROUP) : -1;
+		if (msr < 0)
+			msr = ms_boot_row;
+		if (msr >= 0) {
+			scroll_game_col_to_row(topitem, msr);
+		}
+	}
+}
+
+/* Post-resume worker: park the cursor on the boot-sampled Memory Stick row
+   in stages, so the cursor is already sitting there by the time the entry
+   visibly loads back in (~3s) instead of trailing it. First park right
+   after resume (the cells persist across sleep, so the row is valid even
+   before the icon renders); re-checks bracket the media re-add window
+   (~1.6s) and the visible load-in, correcting any shift they caused. A
+   re-park only fires when the cursor is off-target, so an untouched cursor
+   costs nothing; note the trade-off: navigating inside Game within ~4.5s
+   of wake gets pulled back to Memory Stick -- consistent with parking. */
+static int wake_park_thread(SceSize args, void *argp)
+{
+	int dispcol, tick, wake_on_resume, prev_count, settle;
+	(void)args; (void)argp;
+
+	dispcol = adjust_topitem_for_hidden_categories(5);
+	wake_on_resume = -1;   /* probe once at tick 0, then cache */
+	prev_count = -1;       /* wait for the column to stop shifting before acting */
+	settle = 0;            /* consecutive ticks with an unchanged cell count */
+
+	/* Poll fast (4Hz for ~6s) so the cursor snaps back within a beat of
+	   ANY layout shift -- including the visible Memory Stick load-in --
+	   instead of trailing it on a fixed schedule. User-movement detector:
+	   an item insert changes the column's cell count (list+0x330) while
+	   shifting the cursor row; a user pressing up/down changes the row
+	   with the count unchanged. In the latter case stop interfering. */
+	for (tick = 0; tick < 24; tick++) {
+		u32 obj, arr, list;
+		int cur, count;
+
+		sceKernelDelayThread(250000);
+		if (ms_boot_row < 0 || !scene_ctx || !TopcatPositionFunc)
+			break;
+		obj = *(u32 *)(scene_ctx + 0xA6C);
+		if (!obj)
+			continue;
+		arr = *(u32 *)(obj + 0x360);
+		if (!arr)
+			continue;
+		list = *(u32 *)(arr + dispcol * 4);
+		if (!list)
+			continue;
+
+		count = *(int *)(list + 0x330);
+		cur = TopcatPositionFunc((void *)obj, dispcol);
+
+		/* Pre-stage at the bottom while the media cells are still coming
+		   back: the visible Memory Stick cell arrives LAST (~5s after
+		   resume, vshmain's own mount/scan pipeline -- measured identical
+		   with and without Categories Lite). Waiting at row 3 and then
+		   animating up to it made the cursor visibly trail the entry;
+		   riding the bottom row instead means each insertion is followed
+		   within one tick, and the final hop onto Memory Stick lands
+		   within a frame of its appearance. */
+		{
+			int on_game = (*(int *)(obj + 0x338) == dispcol);
+			/* An overlay/preview came up after resume (e.g. Game>Resume Game's
+			   hover preview restoring a beat after RESUME_COMPLETE, which the
+			   spawn gate couldn't see yet): stand down so we never scroll off
+			   it and strand a ghost. Bit0 set = bare XMB, clear = overlay. */
+			if (!(*(u32 *)((char *)scene_ctx + 0x14C) & 1)) {
+				break;
+			}
+			/* Aim at Memory Stick's row (live group-7 lookup, else the
+			   boot-sampled row). Only act once that row actually EXISTS in the
+			   loaded column (count has grown past it): previously we rode the
+			   bottom row (count-1) while MS was still loading, which snapped the
+			   cursor onto each transient bottom item and read as a slow
+			   step-down. Instead wait, then do a single snap onto Memory Stick
+			   the moment it appears. */
+			int live = FindMediaRowFunc ?
+				FindMediaRowFunc((void *)scene_ctx, dispcol, MS_MEDIA_GROUP) : -1;
+			int aim = (live >= 0) ? live : ms_boot_row;
+			int target;
+
+			if (live >= 0) {
+				/* Memory Stick located BY IDENTITY (group 7): act the INSTANT
+				   it's visible -- no settle wait -- so the cursor jumps to it as
+				   soon as it appears. FindMediaRowFunc returns the group-7 row,
+				   so this is always Memory Stick (never System Storage / Resume
+				   Game); if its row shifts as more cells load, the per-tick
+				   re-park below follows it. */
+				target = aim;
+			} else if (ms_boot_row >= 0 && count > ms_boot_row) {
+				/* CL: no group-7 item (MS is a category), so its row can only be
+				   guessed from the boot sample -- wait until the column has
+				   STOPPED shifting (count unchanged for 2 ticks) before snapping,
+				   so we don't land on a transient row (System Storage, Resume
+				   Game). The cursor rides with its item until then. */
+				if (count != prev_count) {
+					prev_count = count;
+					settle = 0;
+					continue;
+				}
+				if (++settle < 2)
+					continue;
+				target = ms_boot_row;
+			} else {
+				prev_count = count;   /* MS not ready yet -- wait */
+				continue;
+			}
+
+			/* Detect Resume Game FIRST (once, on the Game column), so the
+			   landed/snap logic below never misfires on it while the live MS-row
+			   lookup is momentarily unstable on a non-CL Go (it briefly returns
+			   Resume Game's own row). */
+			if (on_game && wake_on_resume < 0) {
+				sceKernelDelayThread(15000);
+				wake_on_resume = game_row_is_resume(dispcol, cur);
+			}
+
+			/* Landed on Memory Stick -> done. Never treat Resume Game as landed
+			   (wake_on_resume>0); that's handled by the bounce below. */
+			if (on_game && wake_on_resume <= 0 && target >= 0 && cur == target)
+				break;
+
+			/* Slept on another column? Once Memory Stick is ready, PRE-POSITION
+			   the Game column's cursor onto it in the background first, THEN
+			   bring the Game column into view -- so the visible column slide
+			   already shows the cursor on Memory Stick, instead of landing on
+			   Game and then snapping down to it. (paf lets us set a non-current
+			   column's row; the focus-settle inside scroll_game_col_to_row is
+			   skipped while Game isn't current, which is fine -- we only need
+			   the row set before the reveal.) */
+			if (!on_game) {
+				if (target >= 0 && NavigateTopMenuFunc && xmb_interactive()) {
+					scroll_game_col_to_row(dispcol, target);
+					NavigateTopMenuFunc((void *)scene_ctx, dispcol, target);
+				}
+				continue;
+			}
+
+			/* If the resting cursor is on Game>Resume Game, a snap would strand
+			   its preview as a ghost. Inject a REAL d-pad DOWN (through paf's
+			   input path) to step off it -- exactly what a physical press does:
+			   tears the preview down, no crash. Only tap once, then fall through
+			   to the normal snap to finish parking on Memory Stick (the cursor
+			   is now off Resume Game, so the snap strands nothing). */
+			/* Woke on Game>Resume Game. Walk the cursor to Memory Stick with
+			   REAL d-pad taps through paf's input path -- NOT scroll_game_col_
+			   to_row, whose paf poke races paf's own tap-driven navigation and
+			   crashes (confirmed: the injected tap moves the cursor cleanly, but
+			   a scroll on the very next tick collides). One ~60ms tap per tick
+			   (below XMB auto-repeat) moves one row and clears the preview;
+			   repeat until we reach the target, then hand back to the normal
+			   path. MS is below Resume Game, so this is DOWN, but handle both. */
+			if (wake_on_resume > 0) {
+				/* Woke on Game>Resume Game. The cursor is glued to the
+				   hibernation item; there's no input loop during the wake settle
+				   to move it, and a paf snap strands its preview as a ghost.
+				   Use the BOOT mechanism: a real column ENTRY navigate syncs the
+				   selection, tears down the old preview, AND re-renders the
+				   carousel (reloading icons). Do the whole bounce ATOMICALLY
+				   here -- leave Game, wait until we've actually left, then
+				   re-enter at Memory Stick -- so the normal snap never
+				   interleaves and races the carousel re-render (which skipped a
+				   cell and left one icon blank). The slide is near-instant via
+				   the NavigateTopMenuFunc speed patch at init. */
+				int other = (dispcol > 0) ? dispcol - 1 : dispcol + 1;
+				/* Re-enter at `target`: the column has settled (stability gate
+				   above), so the live group-7 lookup now resolves Memory Stick
+				   correctly -- never System Storage (group 8) or Resume Game. */
+				int r = (target >= 0) ? target : 0;
+				u32 o = *(u32 *)(scene_ctx + 0xA6C);
+				int w;
+				if (o && NavigateTopMenuFunc && xmb_interactive()) {
+					NavigateTopMenuFunc((void *)scene_ctx, other, 0);
+					for (w = 0; w < 80; w++) {   /* until we've left Game */
+						sceKernelDelayThread(10000);
+						if (*(int *)(o + 0x338) != dispcol)
+							break;
+					}
+					NavigateTopMenuFunc((void *)scene_ctx, dispcol, r);
+					for (w = 0; w < 80; w++) {   /* until we're back on Game */
+						sceKernelDelayThread(10000);
+						if (*(int *)(o + 0x338) == dispcol)
+							break;
+					}
+					sceKernelDelayThread(120000);   /* let the carousel render */
+				}
+				wake_on_resume = 0;
+				continue;
+			}
+
+			/* On Game, not yet on Memory Stick: snap toward it (unchanged). */
+			if (target >= 0 && cur != target) {
+				scroll_game_col_to_row(dispcol, target);
+			}
+		}
+	}
+
+
+	wake_park_thread_running = 0;
+	return 0;
+}
+
+/* The disc-focus dispatcher (FUN_0002220C) decodes the media flags into a
+   HARDCODED NATIVE column (5/4/3) and navigates there -- under compaction
+   paf clamps that to the rightmost visible category, which is the "boots
+   into Network" / hop-to-Network behavior (hardware-confirmed: 0x222FC is
+   the ONLY caller of the navigate API). Wrap that callsite: adjust the
+   column and recompute the disc row in the ADJUSTED column's model (the
+   native row was computed against the wrong, displayed-indexed list).
+   With START_AT_MEMORY_STICK, park on Memory Stick instead of the disc. */
+/* Disc-focus landing fix: the navigate anchors to the ITEM occupying the
+   target row at execution time -- but the disc cell lands (and, for movie
+   discs, re-registers up to 3x, each cycle re-inserting the cell) around
+   the same moment, so the cursor ends up anchored on Memory Stick one row
+   BELOW the disc (hardware log: nav row=0 passed, t0=1 landed). Wait out
+   the registration churn, then if the user is still in that column and not
+   on the disc row, step onto the disc. */
+static volatile int disc_settle_running = 0;
+static volatile int disc_settle_col = -1;
+static volatile u32 disc_settle_until = 0;
+
+static int disc_focus_settle_thread(SceSize args, void *argp)
+{
+	int col, row, cur;
+	u32 obj;
+	(void)args; (void)argp;
+
+	/* Poll fast and correct IMMEDIATELY whenever the anchoring drags the
+	   cursor off the disc row, instead of one correction after the full
+	   deadline (the old way left a visible ~2s pause on Memory Stick).
+	   Pre-insert the disc row holds Memory Stick, so cur==row and nothing
+	   fires; the moment the cell lands and shifts the cursor down, the
+	   next 100ms tick steps it back up -- through every re-registration
+	   in the churn. Only acts while the target column stays focused. */
+	while ((int)(disc_settle_until - sceKernelGetSystemTimeLow()) > 0) {
+		sceKernelDelayThread(100000);
+		col = disc_settle_col;
+		if (!scene_ctx || col < 0 || !FindMediaRowFunc || !TopcatPositionFunc)
+			continue;
+		obj = *(u32 *)(scene_ctx + 0xA6C);
+		if (!obj || *(int *)(obj + 0x338) != col)
+			continue;
+		row = FindMediaRowFunc((void *)scene_ctx, col, 2);
+		cur = TopcatPositionFunc((void *)obj, col);
+		if (row >= 0 && row != cur) {
+			scroll_game_col_to_row(col, row);
+		}
+	}
+
+	disc_settle_running = 0;
+	return 0;
+}
+
+static void arm_disc_focus_settle(int col)
+{
+	disc_settle_col = col;
+	disc_settle_until = sceKernelGetSystemTimeLow() + 1800000;
+	if (!disc_settle_running) {
+		SceUID tid = sceKernelCreateThread("xmbih_discsettle",
+			disc_focus_settle_thread, 0x18, 0x1000, 0, NULL);
+		if (tid >= 0) {
+			disc_settle_running = 1;
+			sceKernelStartThread(tid, 0, NULL);
+		}
+	}
+}
+
+static void NavigateTopMenuAdjusted(void *ctx, int topitem, int row)
+{
+	int adj = adjust_topitem_for_hidden_categories(topitem);
+	int game_disp = adjust_topitem_for_hidden_categories(5);
+	int live = xmb_interactive();
+
+
+	/* Our START_AT redirect and the async settle only make sense when the
+	   XMB is the interactive foreground. If a dialog is up (bad-EBOOT
+	   crash-back re-registers media, re-running this synchronous path),
+	   skip our additions and just mirror the native adjusted navigate. */
+	if (live && start_at_ms_flag && adj != game_disp &&
+	    (int)(ms_park_redirect_until - sceKernelGetSystemTimeLow()) > 0) {
+		/* This window redirects the disc's async re-focus back to Game>MS.
+		   The disc's own re-registration navigate carries no button press; a
+		   user pressing Left/Right to another column holds a direction as it
+		   fires. Latch that deliberate move: once the user has left Game, a
+		   LATER disc re-registration (movie discs re-register up to 3x, each
+		   several seconds apart) must NOT yank them back off the column they
+		   chose (fixes: Right into PSN snapping back to Game seconds later).
+		   Until the user leaves, keep redirecting the disc focus to MS. */
+		SceCtrlData pad;
+		if ((sceCtrlPeekBufferPositive(&pad, 1) > 0) &&
+		    (pad.Buttons & (PSP_CTRL_LEFT | PSP_CTRL_RIGHT |
+			PSP_CTRL_UP | PSP_CTRL_DOWN)))
+			user_left_game_during_redirect = 1;
+		if (!user_left_game_during_redirect) {
+			NavigateTopMenuFunc(ctx, game_disp,
+				ms_boot_row >= 0 ? ms_boot_row : 0);
+			return;
+		}
+	}
+	if (live)
+		arm_disc_focus_settle(adj);
+
+	if (adj != topitem) {
+		int r2 = -1;
+
+		if (start_at_ms_flag && adj == adjust_topitem_for_hidden_categories(5) &&
+		    ms_boot_row >= 0)
+			r2 = ms_boot_row;
+		else if (FindMediaRowFunc)
+			r2 = FindMediaRowFunc(ctx, adj, 2);
+		if (r2 >= 0)
+			row = r2;
+	} else if (start_at_ms_flag && topitem == 5 && ms_boot_row >= 0) {
+		row = ms_boot_row;
+	}
+
+	NavigateTopMenuFunc(ctx, adj, row);
+}
+
+/* See the declaration comment. Waits out the boot slide / disc-focus race,
+   then re-asserts Game via the native navigate until it sticks (the queued
+   transition can itself lose one more race). Stops as soon as Game is seen
+   focused; gives up after ~4s so a user deliberately navigating away isn't
+   fought forever. */
+static int boot_focus_thread(SceSize args, void *argp)
+{
+	u32 obj = 0;
+	int i, game_disp, row, cur_col;
+	(void)args; (void)argp;
+
+	for (i = 0; i < 400; i++) {        /* wait for the scene, ~10s cap */
+		if (scene_ctx) {
+			obj = *(u32 *)(scene_ctx + 0xA6C);
+			if (obj && *(int *)(obj + 0x334) > 0)
+				break;
+		}
+		sceKernelDelayThread(25000);
+	}
+	sceKernelDelayThread(1200000);     /* let the boot begin to settle */
+
+	/* Exception (user spec): a movie UMD with START_AT_MEMORY_STICK off
+	   keeps the native behavior -- boot lands on Video>UMD. Everything
+	   else boots into Game (at Memory Stick with the flag, or at the Game
+	   column's natural cursor row without it). */
+	if (!start_at_ms_flag && sceUmdCheckMedium() > 0 &&
+	    current_umd_is_video() > 0) {
+		return 0;
+	}
+
+	/* Hold the Game focus through the whole boot window instead of exiting
+	   on first success: the boot slide runs LATE and previously bounced the
+	   focus to its clamped target (rightmost visible) after we had already
+	   declared victory and exited (hardware log). Only correct when the
+	   focus sits on that clamp target, so a user deliberately moving to any
+	   other column during the window is never fought; the trade-off is that
+	   manually selecting the clamp-target column itself within ~10s of boot
+	   gets pulled back once. */
+	{
+		int total_visible = 8 - top_category_hidden_count;
+		int slide_target = (total_visible > 5) ? 5 : total_visible - 1;
+		int navigated = 0;
+		/* Non-START_AT: one preemptive navigate, then a SHORT 3s fuse -- the
+		   genuine bounce arrives within ~1.5s and user presses come later.
+		   START_AT: the boot slide clamps focus to the rightmost visible
+		   column (Network) and can fire LATE -- Categories Lite's index cache
+		   delayed it to ~4s after our preemptive navigate on a PSP Go, past
+		   the old 3s fuse, leaving the cursor on Network. So poll a longer,
+		   faster window, but RELEASE as soon as the slide's bounce is caught
+		   instead of holding the whole window and fighting the user. A "bounce"
+		   is a departure to the clamp/disc target AFTER Game has settled --
+		   distinct from the initial placement, and from a user pressing away
+		   toward some other column. The slide bounces once; the user's own
+		   presses come after and are left alone. */
+		int cap = start_at_ms_flag ? 66 : 12;
+		int poll = start_at_ms_flag ? 120000 : 250000;
+		int on_game = 0;                   /* Game has settled at least once */
+		int bounces = 0;                   /* slide bounces corrected */
+
+		for (i = 0; i < cap; i++) {         /* START_AT ~8s @120ms, else ~3s @250ms */
+			int video_disp = -1;
+
+			if (!scene_ctx || !NavigateTopMenuFunc || hide_top_category(5))
+				break;
+			obj = *(u32 *)(scene_ctx + 0xA6C);
+			if (!obj)
+				break;
+			game_disp = adjust_topitem_for_hidden_categories(5);
+
+			/* Poll the controller directly (reliable, unlike the sporadic
+			   read-hook). ANY direction press flags user navigation, which
+			   stands the boot MS park / row-hold / column watchdog down -- BUT
+			   only ONCE the boot slide has settled. An early press (before the
+			   slide clamps to the rightmost column) must NOT release, or the
+			   slide wins and lands on Network. The slide is settled when we've
+			   caught it (bounces), or Game is itself the slide target (nothing
+			   to catch), or a timeout. */
+			if (start_at_ms_flag) {
+				SceCtrlData pad;
+				u32 btn = 0;
+				if (sceCtrlPeekBufferPositive(&pad, 1) > 0)
+					btn = pad.Buttons;
+				if (btn & (PSP_CTRL_UP | PSP_CTRL_DOWN |
+					PSP_CTRL_LEFT | PSP_CTRL_RIGHT))
+					boot_user_nav = 1;
+				/* Release on the user's press ONLY once the boot slide can no
+				   longer steal focus: we've caught its bounce (bounces>=1), or
+				   Game is itself the rightmost column so there's no slide to
+				   catch (game_disp==slide_target), or a safety timeout. Without
+				   this, an early press releases us before the LATE slide fires
+				   and it clamps the cursor onto Network/PSN with no correction
+				   (hardware log: est latched at ~t56, Up at ~t63, slide to PSN
+				   at ~t65 after we'd already quit). */
+				int slide_settled = (bounces >= 1) ||
+					(game_disp == slide_target) || (i >= 50);
+				if (boot_user_nav && boot_ms_established && slide_settled) {
+					break;
+				}
+			}
+			if (game_disp == slide_target && !start_at_ms_flag)
+				break;             /* slide already lands on Game */
+			/* START_AT: the boot-time jump-to-video-disc does NOT pass
+			   through the wrapped navigate callsite (hardware log: focus
+			   reached Video with no `umd focus nav` line), so catch that
+			   departure here too. */
+			if (start_at_ms_flag && !hide_top_category(4))
+				video_disp = adjust_topitem_for_hidden_categories(4);
+			cur_col = *(int *)(obj + 0x338);
+			/* Latch "Game>Memory Stick established" the first time the cursor is
+			   actually on MS in the Game column. On that transition, forget any
+			   early press that fired before we landed -- only a fresh press AFTER
+			   landing should release the boot holds (an early press must not let
+			   the later boot slide win and land on Network). */
+			if (start_at_ms_flag && cur_col == game_disp && FindMediaRowFunc &&
+			    TopcatPositionFunc) {
+				int msr = FindMediaRowFunc((void *)scene_ctx, game_disp,
+					MS_MEDIA_GROUP);
+				int cr = TopcatPositionFunc((void *)obj, game_disp);
+				if (msr >= 0 && cr == msr) {
+					if (!boot_ms_established)
+						boot_user_nav = 0;
+					boot_ms_established = 1;
+				}
+			}
+			if (cur_col == game_disp) {
+				on_game = 1;
+				/* Row-hold (keeping the cursor on Memory Stick within Game) is
+				   done by start_at_ms_thread. boot_focus only holds the COLUMN
+				   here -- it must run its full window to catch the LATE boot
+				   slide to the rightmost column (Network), so no early exit. */
+			} else if (xmb_interactive()) {
+				int done = navigated;   /* second nav = bounce fix */
+				/* With START_AT the whole point is to always start on
+				   Memory Stick, so re-assert Game from ANY column during
+				   the window -- a Video UMD's disc-focus + slide can land
+				   on Network (col 4, hardware log), which the narrow
+				   slide_target/video_disp conditions missed. Without
+				   START_AT keep the conservative one-shot: only correct
+				   the slide's own clamp-target bounce so a user moving
+				   elsewhere isn't fought. */
+				/* Correct ONLY the boot slide -- a departure to the slide's
+				   clamp target (rightmost visible) or the disc column -- plus the
+				   one-time initial placement. Do NOT blanket-correct every
+				   departure for START_AT: that fought the user's own moves to
+				   other columns (hardware: navigating to col 3 while slide_tgt=5
+				   got yanked back). The slide always clamps to slide_target, so
+				   this still catches it and lands on Game>MS. */
+				int should = !navigated ||
+					(cur_col == slide_target &&
+					 game_disp != slide_target) ||
+					(video_disp >= 0 && cur_col == video_disp);
+
+				if (should) {
+					/* Count only a settled departure to the slide's clamp
+					   (or the disc target): that's the boot slide, not a
+					   user press toward some other column. */
+					if (on_game && (cur_col == slide_target ||
+							cur_col == video_disp))
+						bounces++;
+					/* START_AT: re-assert onto Memory Stick BY IDENTITY
+					   (group 7), never the boot cursor -- which sits on
+					   Resume Game until MS loads, so the old ms_boot_row/
+					   cursor fallback pulled the cursor onto Resume Game.
+					   Fall back to the boot-sampled row (the CL MS-category
+					   case). If MS isn't known yet, SKIP the re-assert rather
+					   than yank onto Resume Game. */
+					if (start_at_ms_flag) {
+						row = FindMediaRowFunc ?
+							FindMediaRowFunc((void *)scene_ctx,
+								game_disp, MS_MEDIA_GROUP) : -1;
+						if (row < 0)
+							row = ms_boot_row;
+					} else {
+						row = TopcatPositionFunc ?
+							TopcatPositionFunc((void *)obj,
+								game_disp) : -1;
+						if (row < 0)
+							row = 0;
+					}
+					if (row >= 0) {
+						NavigateTopMenuFunc((void *)scene_ctx,
+							game_disp, row);
+						navigated = 1;
+						on_game = 0;
+						if (done && !start_at_ms_flag)
+							break;
+					}
+				}
+			}
+			/* START_AT: once the boot slide's bounce is corrected, hand
+			   control back so the user's own navigation isn't fought. (The
+			   user-navigated release at the top of the loop is the robust one --
+			   `bounces` can never trip when the slide clamps to Game itself.) */
+			if (start_at_ms_flag && bounces >= START_AT_HOLD_BOUNCES)
+				break;
+			sceKernelDelayThread(poll);
+		}
+	}
+
+	return 0;
 }
 
 static int start_at_ms_thread(SceSize args, void *argp)
@@ -1294,6 +1838,10 @@ static int start_at_ms_thread(SceSize args, void *argp)
 	u32 obj;
 	int i;
 	(void)args; (void)argp;
+
+	/* This thread owns Memory-Stick parking through the whole boot settle;
+	   keep maybe_jump out of the way until we're done (cleared at the end). */
+	boot_settling = 1;
 
 	/* Wait for the XMB-ready signal: the scene's current top-category field
 	   (obj+0x338) reaches the Game column's displayed index when Game is
@@ -1322,9 +1870,6 @@ static int start_at_ms_thread(SceSize args, void *argp)
 	   filter via the prologue patch; boot_hide_for_ms is now clear so they
 	   pass through and get added.) */
 	boot_hide_for_ms = 0;
-	xlog("start_ms: replay begin game_ctx=%d umd=%d gamedl=%d savedata=%d ark=%d top=%d\n",
-		game_ctx_captured, umd_captured, gamedl_captured, savedata_captured,
-		captured_ark_count, game_topitem);
 	if (game_ctx_captured) {
 		int k;
 		/* Re-add the relocated ARK CFW items FIRST so they land at the TOP of
@@ -1333,17 +1878,178 @@ static int start_at_ms_thread(SceSize args, void *argp)
 		for (k = 0; k < captured_ark_count; k++)
 			AddVshItem((void *)game_a0, game_topitem, &captured_ark[k]);
 		if (umd_captured) {
-			xlog("start_ms: replay umd top=%d a0=0x%08X\n",
-				game_topitem, (u32)game_a0);
 			AddVshItem((void *)game_a0, game_topitem, &captured_umd);
-			refresh_current_game_top_after_replay("start_ms");
+			refresh_current_game_top_after_replay();
 		}
 		if (gamedl_captured)
 			AddVshItem((void *)game_a0, game_topitem, &captured_gamedl);
 		if (savedata_captured)
 			AddVshItem((void *)game_a0, game_topitem, &captured_savedata);
+		if (savedata_ef_captured)
+			AddVshItem((void *)game_a0, game_topitem, &captured_savedata_ef);
 	}
-	xlog("start_ms: replay end\n");
+
+	/* Record Memory Stick's display row -- the wake/reinsert park target.
+	   Ask vshmain for the row by media group (MS_MEDIA_GROUP) rather than
+	   sampling the cursor: on a PSP Go the Game column also carries a System
+	   Storage (ef0, "msg_em") entry one row BELOW Memory Stick, and the boot
+	   cursor can end up riding THAT one, so a cursor sample caught the wrong
+	   row and every re-park then bounced to System Storage. FindMediaRowFunc
+	   returns Memory Stick's row by identity (group 7 = msgshare_ms; group 8
+	   = System Storage). Fall back to the old cursor sample only if the media
+	   lookup is unavailable. */
+	/* Settle window: instead of a blind wait, watch for the cursor to land on
+	   Memory Stick naturally (the boot-hide usually leaves it there on non-Go)
+	   and latch "established" the instant it does -- BEFORE the park below runs
+	   and before an early user press can move the cursor. Otherwise the late
+	   park overrides that press (hardware log: cursor reaches MS at ~t27, user
+	   presses Up at ~t33 onto UMD, park still fires at ~t40 and drags back).
+	   If MS never comes up under the cursor (e.g. a Go with System Storage
+	   sitting under it, or a CL layout with no group-7 item), we fall through
+	   with established still 0 and the park does its normal job. */
+	if (scene_ctx && FindMediaRowFunc && TopcatPositionFunc) {
+		int gcol0 = adjust_topitem_for_hidden_categories(5);
+		int w;
+		for (w = 0; w < 28; w++) {          /* ~0.85s @ 30ms */
+			u32 obj0 = *(u32 *)(scene_ctx + 0xA6C);
+			int msr0 = FindMediaRowFunc((void *)scene_ctx, gcol0,
+				MS_MEDIA_GROUP);
+			int cr0 = obj0 ? TopcatPositionFunc((void *)obj0, gcol0) : -1;
+			if (msr0 >= 0 && cr0 == msr0) {
+				ms_boot_row = msr0;
+				boot_ms_established = 1;
+				break;
+			}
+			sceKernelDelayThread(30000);
+		}
+	} else {
+		sceKernelDelayThread(800000);
+	}
+	if (scene_ctx) {
+		int gcol = adjust_topitem_for_hidden_categories(5);
+		int ms_row = -1, i;
+
+		/* POLL for Memory Stick instead of sampling once: on a Go with many
+		   Game items (ARK Extras + both storages) msgshare_ms can arrive well
+		   after the fixed delay, and the old single sample then fell back to the
+		   boot cursor -- which sits on Resume Game -- and parked there forever
+		   (group 7 never loaded in time). Wait for group 7 to appear; but a CL
+		   layout has NO group-7 item (MS is a category), so bail as soon as the
+		   boot cursor is off Resume Game (CL suppression already left it on the
+		   MS category). */
+		for (i = 0; i < 45; i++) {          /* ~4.5s cap after the 0.8s settle */
+			ms_row = FindMediaRowFunc ?
+				FindMediaRowFunc((void *)scene_ctx, gcol, MS_MEDIA_GROUP) : -1;
+			if (ms_row >= 0)
+				break;
+			obj = *(u32 *)(scene_ctx + 0xA6C);
+			{
+				int cr = (obj && TopcatPositionFunc) ?
+					TopcatPositionFunc((void *)obj, gcol) : -1;
+				if (cr >= 0 && !game_row_is_resume(gcol, cr))
+					break;
+			}
+			sceKernelDelayThread(100000);
+		}
+
+		if (ms_row >= 0) {
+			ms_boot_row = ms_row;
+			/* Actively park onto Memory Stick. The boot cursor rode up to
+			   whatever sat at row 0 (System Storage / Resume Game on a Go), so
+			   it isn't on MS yet -- move it there now. Skip only if the user is
+			   already navigating post-landing; an early press still gets parked
+			   to establish Game>MS. Latch "established" right here (we just put
+			   the cursor on MS) and forget any early press, so the row-hold
+			   below drift-gates instead of force-parking the user's Up/Down. */
+			/* Only park if the cursor hasn't already reached MS. Once
+			   boot_ms_established is set (boot_focus latches it the moment
+			   the cursor is on Game>MS, or we set it right below), the park's
+			   job is done -- firing it again would override the user's own
+			   navigation (their d-pad press can land before boot_focus's
+			   coarse poll notices, so we must not rely on boot_user_nav here). */
+			if (!boot_ms_established) {
+				scroll_game_col_to_row(gcol, ms_row);
+				boot_ms_established = 1;
+			}
+		} else {
+			obj = *(u32 *)(scene_ctx + 0xA6C);
+			if (obj && TopcatPositionFunc)
+				ms_boot_row = TopcatPositionFunc((void *)obj, gcol);
+		}
+
+		/* HOLD Memory Stick through the media re-registration settle. A beat
+		   after the initial park the msgshare_ms cell re-registers and the
+		   cursor drops onto an adjacent item (System Storage below MS, Resume
+		   Game above). Re-park to MS by identity (group 7) on any drift, and
+		   keep running until the column count has stopped changing (settle
+		   done) AND the cursor is on MS -- don't exit on brief early stability,
+		   the drift comes seconds in. */
+		if (ms_row >= 0) {
+			int prevc = -1, stable = 0, j;
+			/* When NO categories left of Game are hidden, the XMB's native
+			   snap-to-UMD fires a beat after boot and would steal focus from
+			   Game>MS onto Game>UMD. In that layout the user wants Memory Stick
+			   to win, so for a short window we also treat the UMD item as a
+			   drift target and re-snap off it -- and keep holding through user
+			   input, so the disc snap (and an Up onto UMD) is pulled back to MS.
+			   When categories left of Game ARE hidden, keep_ms is 0 and the
+			   loop keeps its normal pushback-preventing behavior (Up to UMD is
+			   respected, only System Storage drift is corrected). */
+			int keep_ms = (count_hidden_top_categories_before(5) == 0);
+			int ms_win = keep_ms ? 40 : 0;   /* ~4s of MS-wins hold in config A */
+			for (j = 0; j < 100; j++) {   /* ~10s cap */
+				u32 ar, ls;
+				int cnt, msr, c;
+				/* Stop holding MS once the user is navigating AND the slide has
+				   settled. An early press before settle keeps holding so Game>MS
+				   is established first. In config A, also keep holding through
+				   the MS-wins window so the native disc snap is countered. */
+				if (boot_user_nav && boot_ms_established && j >= ms_win)
+					break;
+				obj = *(u32 *)(scene_ctx + 0xA6C);
+				ar = obj ? *(u32 *)(obj + 0x360) : 0;
+				ls = ar ? *(u32 *)(ar + gcol * 4) : 0;
+				cnt = ls ? *(int *)(ls + 0x330) : -1;
+				msr = FindMediaRowFunc ?
+					FindMediaRowFunc((void *)scene_ctx, gcol,
+						MS_MEDIA_GROUP) : -1;
+				c = (obj && TopcatPositionFunc) ?
+					TopcatPositionFunc((void *)obj, gcol) : -1;
+				/* Before the slide settles, FORCE Memory Stick (re-park any non-MS
+				   row) to establish it against an early press / the boot slide.
+				   After settle, re-park ONLY on a known drift target (System
+				   Storage below MS on a Go; plus UMD in config A during the
+				   MS-wins window). Up/Down to other Game items is the user
+				   navigating and is left alone. */
+				if (msr >= 0 && c >= 0 && c != msr) {
+					int force = !boot_ms_established;
+					SceVshItem *it = force ? (SceVshItem *)0 :
+						game_row_item_at(gcol, c);
+					if (force || (it && (!strcmp(it->text, "msg_em") ||
+					    (keep_ms && j < ms_win &&
+					     !strcmp(it->text, "msgshare_umd"))))) {
+						ms_boot_row = msr;
+						scroll_game_col_to_row(gcol, msr);
+					}
+				}
+				if (cnt != prevc) {
+					prevc = cnt;
+					stable = 0;
+				} else {
+					stable++;
+				}
+				if (stable >= 15 && msr >= 0 && c == msr && j >= ms_win)
+					break;                    /* ~1.5s settled + on MS */
+				sceKernelDelayThread(100000);
+			}
+		}
+
+		/* Cover the tail of the media re-registration even if the loop above
+		   exited early (user navigated), then hand control to maybe_jump for
+		   post-boot physical MS reinserts. */
+		sceKernelDelayThread(5000000);
+	}
+	boot_settling = 0;
 	return 0;
 }
 
@@ -1548,43 +2254,6 @@ static int hide_top_category(int index)
 	return top_category_requested_hidden(index);
 }
 
-static int top_category_mode(int index)
-{
-	if (set[54] == 2) {
-		switch (index) {
-			case 0:
-			case 1:
-			case 2:
-			case 3:
-			case 4:
-			case 5:
-			case 6:
-			case 7:
-				return 2;
-			default:
-				return 0;
-		}
-	}
-
-	switch (index) {
-		case 1:
-			return set[1];
-		case 2:
-			return set[2];
-		case 3:
-			return set[3];
-		case 4:
-			return set[56];
-		case 5:
-			return set[4];
-		case 6:
-			return set[5];
-		case 7:
-			return set[6];
-	}
-
-	return 0;
-}
 
 static int get_top_category_hidden_count(void)
 {
@@ -1602,7 +2271,6 @@ static int get_top_category_hidden_count(void)
 static int AdjustTopCategoryCountAndGetCount(void *ctx)
 {
 	u32 obj;
-	u32 *slots;
 	int count;
 	int new_count;
 
@@ -1616,76 +2284,16 @@ static int AdjustTopCategoryCountAndGetCount(void *ctx)
 	if (top_category_hidden_count <= 0)
 		return count;
 
-	if (obj != top_category_runtime_obj) {
-		u32 arr330;
-
-		slots = (u32 *)(obj + 0x360);
-		arr330 = *(u32 *)(obj + 0x330);
-		xlog("topcat: obj hdr 330=%08X 334=%08X 338=%08X 33C=%08X 340=%08X 344=%08X 348=%08X 34C=%08X 350=%08X 354=%08X 358=%08X 35C=%08X\n",
-			arr330,
-			*(u32 *)(obj + 0x334),
-			*(u32 *)(obj + 0x338),
-			*(u32 *)(obj + 0x33C),
-			*(u32 *)(obj + 0x340),
-			*(u32 *)(obj + 0x344),
-			*(u32 *)(obj + 0x348),
-			*(u32 *)(obj + 0x34C),
-			*(u32 *)(obj + 0x350),
-			*(u32 *)(obj + 0x354),
-			*(u32 *)(obj + 0x358),
-			*(u32 *)(obj + 0x35C));
-		if (arr330) {
-			xlog("topcat: arr330=%08X [%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X]\n",
-				arr330,
-				*(u32 *)(arr330 + 0x00),
-				*(u32 *)(arr330 + 0x04),
-				*(u32 *)(arr330 + 0x08),
-				*(u32 *)(arr330 + 0x0C),
-				*(u32 *)(arr330 + 0x10),
-				*(u32 *)(arr330 + 0x14),
-				*(u32 *)(arr330 + 0x18),
-				*(u32 *)(arr330 + 0x1C));
-		}
-		xlog("topcat: slots=%08X [%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X]\n",
-			(u32)slots,
-			slots[0], slots[1], slots[2], slots[3],
-			slots[4], slots[5], slots[6], slots[7]);
-		top_category_runtime_obj = obj;
-		xlog("topcat: runtime slots left unchanged obj=0x%08X slots=0x%08X\n",
-			obj, (u32)slots);
-		xlog("topcat: ctx e70=%08X,%08X,%08X,%08X,%08X,%08X\n",
-			*(u32 *)((char *)ctx + 0xE70),
-			*(u32 *)((char *)ctx + 0xE74),
-			*(u32 *)((char *)ctx + 0xE78),
-			*(u32 *)((char *)ctx + 0xE7C),
-			*(u32 *)((char *)ctx + 0xE80),
-			*(u32 *)((char *)ctx + 0xE84));
-		xlog("topcat: ctx e88=%08X,%08X,%08X,%08X\n",
-			*(u32 *)((char *)ctx + 0xE88),
-			*(u32 *)((char *)ctx + 0xE94),
-			*(u32 *)((char *)ctx + 0xEA0),
-			*(u32 *)((char *)ctx + 0xEAC));
-	}
 
 	new_count = count - top_category_hidden_count;
 	if (new_count < 1)
 		new_count = 1;
 
 	if (count > new_count) {
-		if (hide_top_category(0)) {
-			if (!top_category_runtime_return_override_logged) {
-				top_category_runtime_return_override_logged = 1;
-				xlog("topcat: settings-hidden skip runtime count patch %d -> %d\n",
-					count, new_count);
-			}
+		if (hide_top_category(0))
 			return count;
-		}
 
 		*(int *)(obj + 0x334) = new_count;
-		if (!top_category_count_logged) {
-			top_category_count_logged = 1;
-			xlog("topcat: runtime count patched %d -> %d\n", count, new_count);
-		}
 		return new_count;
 	}
 
@@ -1712,7 +2320,6 @@ static void PatchTopCategories(u32 text_addr)
 
 	table = find_top_category_table(text_addr);
 	if (!table) {
-		xlog("topcat: table not found\n");
 		return;
 	}
 
@@ -1744,8 +2351,6 @@ static void PatchTopCategories(u32 text_addr)
 		int hide = hide_top_category(i);
 		if (hide) {
 			changed = 1;
-			xlog("topcat: hiding '%s' mode=%d\n", table[i].text,
-				top_category_mode(i));
 			continue;
 		}
 
@@ -1757,7 +2362,6 @@ static void PatchTopCategories(u32 text_addr)
 	}
 
 	if (!changed) {
-		xlog("topcat: no supported category set to 2\n");
 		return;
 	}
 
@@ -1800,8 +2404,6 @@ static void PatchTopCategories(u32 text_addr)
 	memcpy(meta1, filtered_meta1, sizeof(filtered_meta1));
 	memcpy(meta2, filtered_meta2, sizeof(filtered_meta2));
 	memcpy(table, filtered, sizeof(filtered));
-	xlog("topcat: meta0=0x%08X meta1=0x%08X meta2=0x%08X table=0x%08X compacted\n",
-		(u32)meta0, (u32)meta1, (u32)meta2, (u32)table);
 }
 
 int skip(SceVshItem *item, int location)
@@ -1811,14 +2413,11 @@ int skip(SceVshItem *item, int location)
 		return strcmp(item->text, name);
 	}
 
-	/* Single-hide boot stabilizer. On the fast (non-log) path the count==1 layout
-	   overruns vshmain's asynchronous icon/texture loading during the initial
-	   XMB item walk and faults before the XMB appears; the log build only "works"
-	   because its per-line MS writes incidentally throttle the walk (each write
-	   yields the thread, letting the async loads drain). Reproduce that throttle
-	   directly with a brief yield per item -- count==1 only, and only for the
-	   first ~200 items (the boot walk), so navigation and all other layouts are
-	   untouched. */
+	/* Single-hide boot stabilizer. With the count==1 layout the initial XMB
+	   item walk overruns vshmain's asynchronous icon/texture loading and faults
+	   before the XMB appears. A brief yield per item throttles the walk so the
+	   async loads drain -- count==1 only, and only for the first ~200 items (the
+	   boot walk), so navigation and all other layouts are untouched. */
 	{
 		static volatile int boot_throttle_n;
 		if (top_category_hidden_count == 1 && boot_throttle_n < 200) {
@@ -1841,6 +2440,23 @@ int skip(SceVshItem *item, int location)
 			sceKernelStartThread(tid, 0, NULL);
 	}
 
+	/* Boot-into-Game (see boot_focus_thread): spawned from the same vshmain
+	   runtime context as the thread above, for the same reason. Needed only
+	   when (a) categories LEFT of Game are hidden -- the boot slide then
+	   clamps right of Game unless Network/PSN are hidden too, which the
+	   thread's slide-target check handles -- or (b) START_AT_MEMORY_STICK
+	   is set (assert Game>MS over the boot-time jump-to-video-disc). All
+	   other configs boot into Game natively. */
+	if ((count_hidden_top_categories_before(5) > 0 || start_at_ms_flag) &&
+	    !boot_focus_thread_started) {
+		SceUID tid;
+		boot_focus_thread_started = 1;
+		tid = sceKernelCreateThread("xmbih_boot_focus",
+			boot_focus_thread, 0x18, 0x1000, 0, NULL);
+		if (tid >= 0)
+			sceKernelStartThread(tid, 0, NULL);
+	}
+
 	/* START_AT_MEMORY_STICK boot-hide. During the boot pass, force-hide the fixed
 	   Game items that precede Memory Stick (Game Sharing, Saved Data Utility,
 	   and -- when a disc is inserted -- the UMD item) so the cursor lands on
@@ -1857,15 +2473,24 @@ int skip(SceVshItem *item, int location)
 	      !(current_umd_is_video() > 0 && !hide_top_category(4))))) {
 		if (maybe_disable_start_at_ms_from_disc_layout(item, location))
 			return 1;
-		xlog("start_ms: boot-hide capture text='%s' loc=%d\n",
-			item->text, location);
 		if (!idnm("msgtop_game_gamedl") && !gamedl_captured) {
 			memcpy(&captured_gamedl, item, sizeof(SceVshItem));
 			gamedl_captured = 1;
 		}
-		if (!idnm("msgtop_game_savedata") && !savedata_captured) {
-			memcpy(&captured_savedata, item, sizeof(SceVshItem));
-			savedata_captured = 1;
+		if (!idnm("msgtop_game_savedata")) {
+			/* A PSP Go has TWO Saved Data Utility entries: Memory Stick
+			   (location 5) and System Storage / ef0 (location 6). Capture
+			   each into its own slot so both are re-added -- otherwise the
+			   single latch dropped the ef0 one and it vanished. */
+			if (location == 6) {
+				if (!savedata_ef_captured) {
+					memcpy(&captured_savedata_ef, item, sizeof(SceVshItem));
+					savedata_ef_captured = 1;
+				}
+			} else if (!savedata_captured) {
+				memcpy(&captured_savedata, item, sizeof(SceVshItem));
+				savedata_captured = 1;
+			}
 		}
 		if (!idnm("msgshare_umd") && !umd_captured) {
 			memcpy(&captured_umd, item, sizeof(SceVshItem));
@@ -1875,13 +2500,9 @@ int skip(SceVshItem *item, int location)
 	}
 
 	if (!idnm("msg_signup") || !idnm("msg_ps_store") || !idnm("msg_information_board")) {
-		xlog("psn state: text='%s' loc=%d s6=%d s51=%d s52=%d s53=%d s54=%d\n",
-			item->text, location, set[6], set[51], set[52], set[53], set[54]);
 	}
 
 	if (!idnm("msg_game_hibernation")) {
-		xlog("hibernation state: loc=%d s38=%d s4=%d s54=%d\n",
-			location, set[38], set[4], set[54]);
 	}
 
 	if((!(
@@ -1938,7 +2559,7 @@ int skip(SceVshItem *item, int location)
 	return 0;
 }
 
-static int xlog_hook(int loc, SceVshItem *item)
+static int keep_item(int loc, SceVshItem *item)
 {
 	return skip(item, loc);
 }
@@ -2024,8 +2645,6 @@ static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
 {
 	if (is_ark_custom_item(item->text)) {
 		if (!remap_ark_topitem(item->text, incoming_topitem, out_topitem)) {
-			xlog("%s ark item: text='%s' topitem=%d dropped\n",
-				source, item->text, incoming_topitem);
 			return 0;
 		}
 
@@ -2034,17 +2653,12 @@ static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
 		if (move_extra_items_mode() && is_settings_bound_ark_item(item->text))
 			reloc_fix_settings_icon(item);
 
-		xlog("%s ark item: text='%s' topitem=%d adjusted=%d move=%d\n",
-			source, item->text, incoming_topitem, *out_topitem,
-			move_extra_items_mode());
 		return 1;
 		}
 
 	*out_topitem = adjust_topitem_for_hidden_categories(incoming_topitem);
 
 	if (is_game_resume_item(item->text)) {
-		xlog("%s resume item: text='%s' topitem=%d adjusted=%d\n",
-			source, item->text, incoming_topitem, *out_topitem);
 	}
 
 	return 1;
@@ -2135,12 +2749,9 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 	}
 
 	maybe_disable_start_at_ms_for_movie_boot(item, 0, topitem);
-	log_network_item_add("wrapper", 0, incoming_topitem, topitem, item);
 	add_topitem = should_preserve_network_topitem(incoming_topitem, topitem, item) ?
 		incoming_topitem : topitem;
 	if (add_topitem != topitem) {
-		xlog("network preserve topitem: text='%s' orig=%d adj=%d add=%d\n",
-			item->text, incoming_topitem, topitem, add_topitem);
 	}
 
 	/* START_AT_MEMORY_STICK: capture the container + Game topitem the first time we
@@ -2161,12 +2772,12 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 
 	/* Force-forward only the FIRST xmbctrl trigger we see -- that flips
 	   xmbctrl's items_added flag, so the CFW menu items get injected.
-	   Subsequent triggers fall through to xlog_hook (skip()) so the user
+	   Subsequent triggers fall through to keep_item (skip()) so the user
 	   can hide them. The prologue patch above, if it takes effect, also
 	   filters this first trigger's forward so even it gets hidden. */
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(0, item))
+	if(force_trigger || keep_item(0, item))
 		return AddVshItem(a0, add_topitem, item);
 
 	return 0;
@@ -2174,17 +2785,13 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 {
-	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 1, topitem);
-	log_network_item_add("photo", 1, incoming_topitem, topitem, item);
-	if (!strcmp(item->text, "msgshare_ms"))
-		log_msgshare_ms_add("photo", 1, topitem);
 	if (maybe_suppress_media_readd(item, 1, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(1, item))
+	if(force_trigger || keep_item(1, item))
 		return AddVshItem(a0, topitem, item);
 
 	return 0;
@@ -2192,17 +2799,13 @@ int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 {
-	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 2, topitem);
-	log_network_item_add("music", 2, incoming_topitem, topitem, item);
-	if (!strcmp(item->text, "msgshare_ms"))
-		log_msgshare_ms_add("music", 2, topitem);
 	if (maybe_suppress_media_readd(item, 2, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(2, item))
+	if(force_trigger || keep_item(2, item))
 		return AddVshItem(a0, topitem, item);
 
 	return 0;
@@ -2210,17 +2813,13 @@ int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 {
-	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 3, topitem);
-	log_network_item_add("video", 3, incoming_topitem, topitem, item);
-	if (!strcmp(item->text, "msgshare_ms"))
-		log_msgshare_ms_add("video", 3, topitem);
 	if (maybe_suppress_media_readd(item, 3, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(3, item))
+	if(force_trigger || keep_item(3, item))
 		return AddVshItem(a0, topitem, item);
 
 	return 0;
@@ -2228,18 +2827,13 @@ int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 {
-	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 4, topitem);
-	log_network_item_add("game", 4, incoming_topitem, topitem, item);
-	if (!strcmp(item->text, "msgshare_ms")) {
-		log_msgshare_ms_add("game", 4, topitem);
-	}
 	if (maybe_suppress_media_readd(item, 4, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(4, item))
+	if(force_trigger || keep_item(4, item))
 		return AddVshItem(a0, topitem, item);
 
 	return 0;
@@ -2247,15 +2841,13 @@ int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 {
-	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 5, topitem);
-	log_network_item_add("gms", 5, incoming_topitem, topitem, item);
 	if (maybe_suppress_media_readd(item, 5, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(5, item))
+	if(force_trigger || keep_item(5, item))
 		return AddVshItem(a0, topitem, item);
 
 	return 0;
@@ -2263,15 +2855,13 @@ int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
 {
-	int incoming_topitem = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 6, topitem);
-	log_network_item_add("gef", 6, incoming_topitem, topitem, item);
 	if (maybe_suppress_media_readd(item, 6, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || xlog_hook(6, item))
+	if(force_trigger || keep_item(6, item))
 		return AddVshItem(a0, topitem, item);
 
 	return 0;
@@ -2291,9 +2881,6 @@ static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 	if (maybe_suppress_media_readd(item, 3, adjusted_topitem))
 		return 0;
 
-	xlog("umd video add text='%s' top=%d adj=%d\n",
-		item->text, topitem, adjusted_topitem);
-	log_network_item_add("umdvid", 3, topitem, adjusted_topitem, item);
 	return AddVshItem(a0, adjusted_topitem, item);
 }
 
@@ -2306,16 +2893,11 @@ static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 	if (maybe_suppress_media_readd(item, 4, adjusted_topitem))
 		return 0;
 
-	xlog("umd game add text='%s' top=%d adj=%d\n",
-		item->text, topitem, adjusted_topitem);
-	log_network_item_add("umdgame", 4, topitem, adjusted_topitem, item);
 	return AddVshItem(a0, adjusted_topitem, item);
 }
 
 static int UmdVideoSelectShiftPatched(void *ctx, int topitem)
 {
-	xlog("umd video select top=%d adj=%d\n", topitem,
-		adjust_topitem_for_hidden_categories(topitem));
 	return TopcatSelectShiftedFunc(ctx,
 		adjust_topitem_for_hidden_categories(topitem), topitem);
 }
@@ -2323,12 +2905,8 @@ static int UmdVideoSelectShiftPatched(void *ctx, int topitem)
 static int UmdGameSelectShiftPatched(void *ctx, int topitem)
 {
 	if (should_suppress_umd_select_route(topitem)) {
-		xlog("umd game select suppressed top=%d adj=%d\n", topitem,
-			adjust_topitem_for_hidden_categories(topitem));
 		return 0;
 	}
-	xlog("umd game select top=%d adj=%d\n", topitem,
-		adjust_topitem_for_hidden_categories(topitem));
 	return TopcatSelectShiftedFunc(ctx,
 		adjust_topitem_for_hidden_categories(topitem), topitem);
 }
@@ -2337,38 +2915,18 @@ static int UmdTopcatPositionShiftPatched(void *obj, int topitem)
 {
 	int adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
 
-	xlog("umd pos orig=%d adj=%d\n", topitem, adjusted_topitem);
 	return TopcatPositionFunc(obj, adjusted_topitem);
 }
 
 /* FIX: force ICON0 (asset 2) to report "needs loading" in the compacted layout
    so the disc-preview refresh actually attempts the real load instead of
    skipping it on a stale state slot. Re-fires each refresh until it sticks. */
-static volatile int disc_force_count;
 static int DiscAssetNeededWrap(void *ctx, int asset)
 {
 	int ret = DiscAssetNeeded(ctx, asset);
 	if (asset == 2 && top_category_hidden_count > 0 && ret != 0) {
 		if (ClearDiscAsset)
 			ClearDiscAsset(ctx, asset);
-#if XLOG_ENABLED
-		/* Read-only A/B diagnostic. Disc type +0x130/+0x134, branch flags +0xfc,
-		   cursor column obj+0x338, and the ICON0 texture/state on ctx_e70 after
-		   clearing the native asset slot. Compare a WORKING hide config
-		   (photo+music+psn) vs the BLANK one (video+network). */
-		if (disc_force_count < 24) {
-			u32 c = (u32)ctx;
-			u32 e70 = *(u32 *)(c + 0xe70);
-			u32 obj = *(u32 *)(c + 0xa6c);
-
-			xlog("dbg: t130=%d t134=%d flags=%08X col=%d e70=%08X tex08=%08X st30=%08X (was %08X)\n",
-				*(int *)(c + 0x130), *(int *)(c + 0x134), *(u32 *)(c + 0xfc),
-				obj ? *(int *)(obj + 0x338) : -1, e70,
-				e70 ? *(u32 *)(e70 + 8) : 0,
-				e70 ? *(u32 *)(e70 + 0x30) : 0, (u32)ret);
-			disc_force_count++;
-		}
-#endif
 		return 0;
 	}
 	return ret;
@@ -2379,7 +2937,6 @@ static int DiscAssetNeededWrap(void *ctx, int asset)
    adjust_topitem_for_hidden_categories(native), so remove there too. Catches
    every removal path (full clear, per-eject UMD/MS) since they all funnel here.
    Runs on vshmain's own thread (same context as the native removal). */
-static volatile int media_remove_probe;
 static int RemoveMediaShiftWrap(void *ctx, int topitem, int group)
 {
 	int ret = RemoveMediaByRelocate(ctx, topitem, group);
@@ -2387,14 +2944,8 @@ static int RemoveMediaShiftWrap(void *ctx, int topitem, int group)
 		int adj = adjust_topitem_for_hidden_categories(topitem);
 		if (adj != topitem) {
 			int r2 = RemoveMediaByRelocate(ctx, adj, group);
-			if (r2 > 0) {
+			if (r2 > 0)
 				ret += r2;
-				if (media_remove_probe < 60) {
-					xlog("media remove: col %d->%d grp %d removed %d\n",
-						topitem, adj, group, r2);
-					media_remove_probe++;
-				}
-			}
 		}
 	}
 	return ret;
@@ -2409,6 +2960,7 @@ static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 	int ret;
 
 	asm volatile("move %0, $t0" : "=r"(t0_arg));
+
 
 	adjusted_network_topitem = adjust_topitem_for_hidden_categories(6);
 
@@ -2451,44 +3003,19 @@ static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 	return ret;
 }
 
-#if XLOG_ENABLED
-static volatile u32 icon_probe_seen[256];
-static volatile int icon_probe_seen_count;
-#endif
 
-static int IconResolveProbe(void *buf, void *atlas, void *entry)
+static int IconGetTexWrap(void *buf, void *atlas, void *entry)
 {
-#if XLOG_ENABLED
-	u32 key;
-	int i, dup = 0;
-	int newly_seen = 0;
-#endif
 	u32 off = (u32)entry - (u32)atlas;
 	u32 entry_addr = (u32)entry;
 	void *record = 0;
 	u32 mod;
 	int loaded = *(int *)((char *)entry + 0x18);
 
-#if XLOG_ENABLED
-	key = (off & 0x0FFFFFFF) | (loaded ? 0x80000000u : 0u);
-	for (i = 0; i < icon_probe_seen_count; i++) {
-		if (icon_probe_seen[i] == key) {
-			dup = 1;
-			break;
-		}
-	}
-	if (!dup && icon_probe_seen_count < 256) {
-		icon_probe_seen[icon_probe_seen_count++] = key;
-		newly_seen = 1;
-		xlog("ic: atlas=0x%08X off=0x%X loaded=%d\n", (u32)atlas, off, loaded);
-	}
-#endif
 
-	/* Learn the icon plane layout from the live atlas. This MUST run in both
-	   the log and non-log builds: the visible-icon priming below depends on
-	   the icon_layout_* globals populated here. It previously lived inside the
-	   XLOG_ENABLED block, so non-log builds never learned the layout and the
-	   network category icons stayed invisible. */
+	/* Learn the icon plane layout from the live atlas. The visible-icon priming
+	   below depends on the icon_layout_* globals populated here, so this runs
+	   unconditionally -- without it the network category icons stay invisible. */
 	if (loaded == 0) {
 		if (icon_layout_atlas != (u32)atlas) {
 			icon_layout_atlas = (u32)atlas;
@@ -2504,13 +3031,6 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 			icon_layout_main_mod = icon_layout_prev2_off % 0x58;
 			icon_layout_shadow_mod = icon_layout_prev1_off % 0x58;
 			icon_layout_glow_mod = off % 0x58;
-#if XLOG_ENABLED
-			xlog("icon layout: atlas=0x%08X mods=%X/%X/%X\n",
-				(u32)atlas,
-				icon_layout_main_mod,
-				icon_layout_shadow_mod,
-				icon_layout_glow_mod);
-#endif
 		}
 		icon_layout_prev2_off = icon_layout_prev1_off;
 		icon_layout_prev1_off = off;
@@ -2537,57 +3057,12 @@ static int IconResolveProbe(void *buf, void *atlas, void *entry)
 
 		if (record) {
 			EnsureIconEntryFunc(atlas, record);
-#if XLOG_ENABLED
-			if (network_visible_prime_probe_count < 24) {
-				xlog("network visible prime: off=0x%X mod=0x%X rec=0x%08X post=%d\n",
-					off, mod, (u32)record,
-					*(int *)((char *)entry + 0x18));
-				network_visible_prime_probe_count++;
-			}
-#endif
 		}
 	}
 
-#if XLOG_ENABLED
-	{
-		/* Post-call marker (deduped to match the pre-call 'ic:' line, so this
-		   stays low-volume and xlog can flush each line to MS before the next
-		   op). If the crash is INSIDE IconGetTex, the faulting entry's 'ic:'
-		   line is present but its 'icret' is not -- localizing the freeze.
-		   When network is hidden the prime block above is inert (need_network_
-		   icon_prime()==0), so the only work between the two markers is the
-		   IconGetTex call itself. */
-		int ret = IconGetTex(buf, atlas, entry);
-		if (newly_seen)
-			xlog("icret off=0x%X tex=0x%08X\n", off, (u32)ret);
-		return ret;
-	}
-#else
 	return IconGetTex(buf, atlas, entry);
-#endif
 }
 
-#if XLOG_ENABLED
-static int ResolveIconKeyProbePatched(const char *icon_key, int *out0, int *out1,
-	int *out2)
-{
-	int ret = ResolveIconKeyHelper(icon_key, out0, out1, out2);
-
-	if (network_resolve_probe_active &&
-	    network_resolve_probe_key &&
-	    network_track_probe_count < 32) {
-		xlog("network resolve key: key='%s' ret=%d out0=%d out1=%d out2=%d arg='%s'\n",
-			network_resolve_probe_key,
-			ret,
-			out0 ? *out0 : -1,
-			out1 ? *out1 : -1,
-			out2 ? *out2 : -1,
-			icon_key ? icon_key : "(null)");
-	}
-
-	return ret;
-}
-#endif
 
 void PatchVshMain(u32 text_addr)
 {
@@ -2604,17 +3079,6 @@ void PatchVshMain(u32 text_addr)
 		AddVshItem = (void *)(((jal & 0x03FFFFFF) << 2) | (site & 0xF0000000));
 	}
 
-	xlog("PatchVshMain: text=0x%08X AddVshItem=0x%08X\n", text_addr, (u32)AddVshItem);
-	xlog("  patch[0]=0x%X first4@AddVshItem=0x%08X\n", patch[0], *(u32 *)AddVshItem);
-	{
-		int i;
-		for (i = 1; i <= 12; i++) {
-			u32 addr = text_addr + patch[i];
-			u32 pre = *(u32 *)addr;
-			xlog("  patch[%d]=0x%X site=0x%08X pre=0x%08X (op=0x%02X)\n",
-				i, patch[i], addr, pre, (pre >> 26) & 0x3F);
-		}
-	}
 
 	/* Prologue-patch the real AddVshItem (Layer 2). Filters xmbctrl's
 	   forwarded trigger item so even the first trigger is hideable. */
@@ -2632,23 +3096,70 @@ void PatchVshMain(u32 text_addr)
 
 	/* Permanently items */
 	MAKE_CALL(text_addr + patch[1], AddVshItemPatched);
-	xlog("  patch[1] post=0x%08X\n", *(u32 *)(text_addr + patch[1]));
 
 	if (topcat_count_patch) {
 		MAKE_CALL(text_addr + topcat_count_patch, AdjustTopCategoryCountAndGetCount);
 		_sw(0x02402021, text_addr + topcat_count_patch + 4);
-		xlog("  topcat count patch=0x%X site=0x%08X post=0x%08X delay=0x%08X\n",
-			topcat_count_patch, text_addr + topcat_count_patch,
-			*(u32 *)(text_addr + topcat_count_patch),
-			*(u32 *)(text_addr + topcat_count_patch + 4));
 	}
 
 	if (devkit == FW(0x660)) {
 		TopcatSelectShiftedFunc = (int (*)(void *, int, int))(text_addr + 0x22998);
 		TopcatPositionFunc = (int (*)(void *, int))(text_addr + 0x3F4E0);
+		/* paf list primitives for the post-boot park-on-Memory-Stick jump
+		   (see maybe_jump_game_cursor_to_ms). Same import-stub block as
+		   TopcatPositionFunc, resolved by the loader at runtime. */
+		ListSetRowFunc = (int (*)(void *, int, int))(text_addr + 0x3F378);
+		ListFocusCheckFunc = (int (*)(void))(text_addr + 0x3FB90);
+		list_scroll_fwd_addr = text_addr + 0x3F230;
+		list_scroll_back_addr = text_addr + 0x3F798;
+		list_focus_addr = text_addr + 0x3F640;
+		NavigateTopMenuFunc = (void (*)(void *, int, int))(text_addr + 0x2240C);
+		FindMediaRowFunc = (int (*)(void *, int, int))(text_addr + 0x2128C);
+		if (start_at_ms_flag) {
+			/* Speed up NavigateTopMenuFunc's column-slide animation so the wake
+			   resume re-entry bounce (see wake_park) is near-instant. 0x22478 is
+			   `lui at,0x4284` (66.0f) feeding $f12 to the transition (0x3F6C0) --
+			   this is the animation DURATION (bigger = slower; 2000.0f never
+			   completed in the wake window). LOWER it to ~8.0f. Only programmatic
+			   navigates use 0x2240C (the user's left/right go through paf
+			   directly), so normal XMB feel is unchanged. */
+			_sw(0x3C014100, text_addr + 0x22478);   /* lui at,0x4100 (8.0f) */
+			sceKernelDcacheWritebackAll();
+			kuKernelIcacheInvalidateAll();
+		}
+		/* Disc-focus column fix: the only 0x2240C caller (see
+		   NavigateTopMenuAdjusted). */
+		MAKE_CALL(text_addr + 0x222FC, NavigateTopMenuAdjusted);
+		/* NOTE: adjusting the FUN_0002128C row-lookup callsites inside
+		   FUN_0002220C (0x22254/0x22310/0x22338) made the compacted
+		   disc-focus dispatch survive, but broke the UMD video ICON0
+		   preview -- 0x2128C is apparently stateful beyond the row
+		   lookup (native-col keyed disc/preview state). REVERTED; the
+		   compacted disc-focus stays non-dispatching (its historical
+		   behavior), covered by the boot watchdog / wake park instead. */
+		/* Resolve paf's set-row-with-relayout for clean snaps (see the
+		   declaration). paf is 6.60's scePaf_Module, loaded before
+		   vshmain. */
+		{
+			SceModule2 paf_mod;
+			if (kuKernelFindModuleByName("scePaf_Module", &paf_mod) >= 0 &&
+			    paf_mod.text_addr) {
+				paf_list_setrow_addr = paf_mod.text_addr + 0x10DD1C;
+			}
+		}
+
+		/* Boot window for the START_AT disc-focus redirect -- armed only
+		   when a disc is ALREADY in the drive: with an empty tray, any
+		   later disc focus is a genuine hot-insert and must jump to the
+		   disc natively no matter how early it happens (hardware-hit:
+		   inserting a movie disc 17s after boot got mis-redirected). */
+		if (start_at_ms_flag && sceUmdCheckMedium() > 0) {
+			ms_park_redirect_until =
+				sceKernelGetSystemTimeLow() + 45000000;
+			user_left_game_during_redirect = 0;
+		}
 		TrackColumnIconKey = (int (*)(void *, int, const char *))(text_addr + 0x2EDBC);
 		NetworkDispatchFunc = (int (*)(void *, int, int, int))(text_addr + 0x2DF34);
-		ResolveIconKeyHelper = (int (*)(const char *, int *, int *, int *))(text_addr + 0x2F0F8);
 		EnsureIconEntryFunc = (int (*)(void *, void *))(text_addr + 0x2EA7C);
 		FinalizeIconEntryFunc = (int (*)(void *, void *, int, int))(text_addr + 0x2EBE4);
 		MAKE_CALL(text_addr + 0x22C7C, UmdVideoAddPatchedRet);
@@ -2766,17 +3277,8 @@ void PatchVshMain(u32 text_addr)
 		MAKE_CALL(text_addr + 0x1af1c, DiscAssetNeededWrap);
 		MAKE_CALL(text_addr + 0x1af54, DiscAssetNeededWrap);
 		IconGetTex = (int (*)(void *, void *, void *))(text_addr + 0x2D7D4);
-		MAKE_CALL(text_addr + 0x2D8A0, IconResolveProbe);
+		MAKE_CALL(text_addr + 0x2D8A0, IconGetTexWrap);
 
-#if XLOG_ENABLED
-		/* DIAGNOSTIC: hook the icon resolver's load-check (0x2d7d4, called from
-		   0x2d820 at 0x2d8a0). It receives (buf, atlas, entry); *(entry+0x18)==0
-		   means the texture isn't loaded -> the icon renders blank. Log distinct
-		   (atlas, entry-offset, loaded) tuples so we can see, for the render's
-		   item-icon resolves, which atlas Network uses and whether its entries
-		   are loaded -- shifted vs at native index 6. */
-		MAKE_CALL(text_addr + 0x2EDF4, ResolveIconKeyProbePatched);
-#endif
 	}
 
 	/* Photo Memory Stick */
@@ -2848,11 +3350,6 @@ int OnModuleStart(SceModule2 *mod)
 	if(strcmp(modname, "vsh_module") == 0) {
 		vsh_seg1_addr = mod->segmentaddr[1];
 		vsh_seg1_size = mod->segmentsize[1];
-		xlog("OnModuleStart: vsh_module text=0x%08X patching s6=%d s51=%d s52=%d s53=%d s38=%d\n",
-			text_addr, set[6], set[51], set[52], set[53], set[38]);
-		xlog("OnModuleStart: vsh seg0=0x%08X size0=0x%08X seg1=0x%08X size1=0x%08X\n",
-			mod->segmentaddr[0], mod->segmentsize[0],
-			mod->segmentaddr[1], mod->segmentsize[1]);
 		PatchVshMain(text_addr);
 	}
 
@@ -2861,50 +3358,21 @@ int OnModuleStart(SceModule2 *mod)
 
 int module_start(SceSize args, void *argp)
 {
-	SceUID logfd;
-
-#if XLOG_ENABLED
-	logfd = sceIoOpen("ms0:/xmbih.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
-	if (logfd >= 0)
-		sceIoClose(logfd);
-#else
-	(void)logfd;
-#endif
-
-	xlog_raw_both("xmbih: module_start entry\n");
-	if (argp) {
-		xlog_raw_both("xmbih: argp=");
-		xlog_raw_both((const char *)argp);
-		xlog_raw_both("\n");
-	} else {
-		xlog_raw_both("xmbih: argp=NULL\n");
-	}
-
-	xlog_raw_both("ck1: pre-devkit\n");
 	devkit = sceKernelDevkitVersion();
-	xlog_raw_both("ck2: post-devkit\n");
 	psp_model = kuKernelGetModel();
-	xlog_raw_both("ck3: post-kuKernelGetModel\n");
 
 	/* Make ini Path */
 	strcpy(ini_path, argp);
 	strrchr(ini_path, '/')[1] = 0;
 	strcpy(ini_path + strlen(ini_path), "xmbih.ini");
-	xlog_raw_both("ck4: ini_path=");
-	xlog_raw_both(ini_path);
-	xlog_raw_both("\n");
 
-	xlog("xmbih: devkit=0x%X psp_model=%d\n", devkit, psp_model);
-	xlog_raw_both("ck5: post-first-xlog\n");
-	start_power_debugging();
+	start_power_callbacks();
 
-	xlog_raw_both("cfg: global 0\n");
 	/* Global */
 	set[0] = cfg(global_category, "HIDE_ALL_SETTINGS");
 	set[1] = cfg(global_category, "HIDE_ALL_EXTRAS");
 	if (set[1] == 2) {
 		set[1] = 1;
-		xlog("topcat: HIDE_ALL_EXTRAS=2 not supported; forcing content-only hide\n");
 	}
 	set[2] = cfg(global_category, "HIDE_ALL_PHOTO");
 	set[3] = cfg(global_category, "HIDE_ALL_MUSIC");
@@ -2924,16 +3392,14 @@ int module_start(SceSize args, void *argp)
 		/* Game's displayed index = 5 minus any hidden pre-Game categories,
 		   so the XMB-ready signal matches regardless of what's hidden. */
 		start_ms_game_index = adjust_topitem_for_hidden_categories(5);
+
 	}
 	boot_umd_defer_active = should_defer_boot_umd_add() && sceUmdCheckMedium() > 0;
 	boot_umd_defer_captured = 0;
 	boot_umd_defer_thread_started = 0;
 	boot_umd_a0 = 0;
 	boot_umd_topitem = 0;
-	if (boot_umd_defer_active)
-		xlog("boot_umd: defer active\n");
 
-	xlog_raw_both("cfg: settings 1\n");
 	/* Settings */
 	set[7] = cfg(settings_category, "SYSTEM_UPDATE");
 	set[8] = cfg(settings_category, "USB");
@@ -2950,7 +3416,6 @@ int module_start(SceSize args, void *argp)
 	set[19] = cfg(settings_category, "RSS");
 	set[20] = cfg(settings_category, "NETWORK");
 
-	xlog_raw_both("cfg: extras 2\n");
 	/* Extras */
 	set[21] = cfg(extras_category, "1SEG");
 	set[22] = cfg(extras_category, "T-DMB");
@@ -2958,25 +3423,21 @@ int module_start(SceSize args, void *argp)
 	set[24] = cfg(extras_category, "DIGITAL_COMICS");
 	set[26] = cfg(extras_category, "X-RADAR_PORTABLE");
 
-	xlog_raw_both("cfg: photo 3\n");
 	/* Photo */
 	set[27] = cfg(photo_category, "CAMERA");
 	set[28] = cfg(photo_category, "MEMORY_STICK");
 	set[29] = cfg(photo_category, "SYSTEM_STORAGE");
 
-	xlog_raw_both("cfg: music 4\n");
 	/* Music */
 	set[25] = cfg(music_category, "MUSIC_UNLIMITED");
 	set[30] = cfg(music_category, "SENSME_CHANNELS");
 	set[31] = cfg(music_category, "MEMORY_STICK");
 	set[32] = cfg(music_category, "SYSTEM_STORAGE");
 
-	xlog_raw_both("cfg: video 5\n");
 	/* Video */
 	set[33] = cfg(video_category, "MEMORY_STICK");
 	set[34] = cfg(video_category, "SYSTEM_STORAGE");
 
-	xlog_raw_both("cfg: game 6\n");
 	/* Game */
 	set[35] = cfg(game_category, "GAME_SHARING");
 	set[58] = cfg(game_category, "UMD_UPDATE");
@@ -2986,7 +3447,6 @@ int module_start(SceSize args, void *argp)
 	set[39] = cfg(game_category, "MEMORY_STICK");
 	set[40] = cfg(game_category, "SYSTEM_STORAGE");
 
-	xlog_raw_both("cfg: network 7\n");
 	/* Network */
 	set[41] = cfg(network_category, "ONLINE_MANUAL");
 	set[42] = cfg(network_category, "LOCATION_FREE_PLAYER");
@@ -2999,12 +3459,10 @@ int module_start(SceSize args, void *argp)
 	set[49] = cfg(network_category, "PLAYSTATION_SPOT");
 	set[50] = cfg(network_category, "GO_MESSENGER");
 
-	xlog_raw_both("cfg: psn 8\n");
 	/* PlayStation�Network */
 	set[51] = cfg(playstation_network_category, "SIGN_UP_OR_ACCOUNT_MANAGEMENT");
 	set[52] = cfg(playstation_network_category, "PLAYSTATION_STORE");
 	set[53] = cfg(playstation_network_category, "INFORMATION_BOARD");
-	xlog_raw_both("cfg: done 9\n");
 
 	/** 
 	* Offsets for patches (for update use prxtool)
@@ -3100,30 +3558,14 @@ int module_start(SceSize args, void *argp)
 	}
 
 	top_category_hidden_count = get_top_category_hidden_count();
-	top_category_count_logged = 0;
 	top_category_runtime_obj = 0;
 
-	xlog_raw_both("ck6: post-ini-parse\n");
-	xlog("settings: USE_PLUGIN=%d HIDE_ALL=%d PSN=%d MOVE_ARK_EXTRAS=%d\n",
-		set[55], set[54], set[6], set[57]);
-	if (set[0] == 2)
-		xlog("topcat: HIDE_ALL_SETTINGS=2 not supported; ignoring top-category hide\n");
-	if (set[54] == 2)
-		xlog("topcat: HIDE_ALL=2 blank-row mode enabled\n");
-	xlog("topcat: hidden count=%d\n", top_category_hidden_count);
-	xlog("MS: &set=0x%08X &set[55]=0x%08X *(&set[55])=%d\n",
-		(unsigned int)&set[0], (unsigned int)&set[55], set[55]);
 	if (!set[55]) {
-		xlog("USE_PLUGIN=0 at module_start, not installing handler\n");
 		return 0;
 	}
 
-	xlog_raw_both("ck7: pre-sctrlHENSetStartModuleHandler\n");
 	previous = sctrlHENSetStartModuleHandler(OnModuleStart);
-	xlog_raw_both("ck8: post-sctrlHENSetStartModuleHandler\n");
 
-	xlog("module_start done; handler installed\n");
-	xlog_scene_state("module_start_done");
 
 	return 0;
 }
