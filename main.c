@@ -62,7 +62,7 @@ PSP_MODULE_INFO("XMBIH", 0x0007, 1, 3);
 
 static struct {
 	volatile unsigned char guard[0x200];
-	volatile unsigned char flags[59];
+	volatile unsigned char flags[64];
 } cfg_store;
 
 #define set cfg_store.flags
@@ -2610,6 +2610,23 @@ static int is_ark_custom_item(const char *text)
 		!strcmp(text, "xmbmsgtop_150_reboot");
 }
 
+/* Per-item hide flags for ARK's injected CFW menu items (ini [Extras]).
+   The text keys are identical on ARK-4 and ARK-5, so one mapping covers both.
+     CUSTOM_FIRMWARE_SETTINGS -> xmbmsgtop_sysconf_configuration (set[59])
+     PLUGINS_MANAGER          -> xmbmsgtop_sysconf_plugins       (set[60])
+     CUSTOM_LAUNCHER          -> xmbmsgtop_custom_launcher       (set[61])
+   Returns nonzero when the user has set that item to 1 (hide). */
+static int is_ark_item_hidden(const char *text)
+{
+	if (!strcmp(text, "xmbmsgtop_sysconf_configuration"))
+		return set[59];
+	if (!strcmp(text, "xmbmsgtop_sysconf_plugins"))
+		return set[60];
+	if (!strcmp(text, "xmbmsgtop_custom_launcher"))
+		return set[61];
+	return 0;
+}
+
 static int is_game_resume_item(const char *text)
 {
 	return !strcmp(text, "msg_game_hibernation");
@@ -2644,6 +2661,13 @@ static int prepare_topitem_for_item(SceVshItem *item, int incoming_topitem,
 	int *out_topitem, const char *source)
 {
 	if (is_ark_custom_item(item->text)) {
+		/* User hid this CFW item (ini [Extras]): drop it outright. This takes
+		   priority over MOVE_ARK_EXTRAS -- a hidden item is never relocated,
+		   just removed -- and, because we return before the boot-hide capture
+		   in the filter, it's never re-added by the START_AT worker either. */
+		if (is_ark_item_hidden(item->text))
+			return 0;
+
 		if (!remap_ark_topitem(item->text, incoming_topitem, out_topitem)) {
 			return 0;
 		}
@@ -3366,6 +3390,7 @@ int module_start(SceSize args, void *argp)
 	strrchr(ini_path, '/')[1] = 0;
 	strcpy(ini_path + strlen(ini_path), "xmbih.ini");
 
+
 	start_power_callbacks();
 
 	/* Global */
@@ -3422,6 +3447,11 @@ int module_start(SceSize args, void *argp)
 	set[23] = cfg(extras_category, "JP_BOOKREADER");
 	set[24] = cfg(extras_category, "DIGITAL_COMICS");
 	set[26] = cfg(extras_category, "X-RADAR_PORTABLE");
+	/* ARK-4/ARK-5 CFW menu items (same text keys on both). Set to 1 to hide;
+	   a hidden item is never relocated by MOVE_ARK_EXTRAS. */
+	set[59] = cfg(extras_category, "CUSTOM_FIRMWARE_SETTINGS");
+	set[60] = cfg(extras_category, "PLUGINS_MANAGER");
+	set[61] = cfg(extras_category, "CUSTOM_LAUNCHER");
 
 	/* Photo */
 	set[27] = cfg(photo_category, "CAMERA");
