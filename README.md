@@ -11,15 +11,17 @@ Tested on:
 ## Installation:
 1\. Download & Extract the `.zip` from [the latest Release](https://github.com/wad11656/XMB-Item-Hider-PSP/releases/latest)<br>
 
-2\. Move the included `.prx` and `.ini` to `<MemoryStick>:/SEPLUGINS` _(non-PSP Go)_ or `<InternalStorage>:/SEPLUGINS` _(PSP Go)_.<br>
+2\. Move the included `xmbih.prx` and `xmbih.ini` to `<MemoryStick>:/SEPLUGINS` _(non-PSP Go)_ or `<InternalStorage>:/SEPLUGINS` _(PSP Go)_.<br>
 
 &nbsp;&nbsp;&nbsp;&nbsp;3a\. **ARK CFW:** Add `vsh, ms0:/SEPLUGINS/xmbih.prx, on` _(non-PSP Go)_ or `vsh, ef0:/SEPLUGINS/xmbih.prx, on` _(PSP Go)_ to your `<StorageDevice>:/SEPLUGINS/PLUGINS.txt`.<br>
 
 &nbsp;&nbsp;&nbsp;&nbsp;3b\. **Non-ARK CFW:** Add `ms0:/SEPLUGINS/xmbih.prx 1` _(non-PSP Go)_ or `ef0:/SEPLUGINS/xmbih.prx 1` _(PSP Go)_ to your `<StorageDevice>:/SEPLUGINS/VSH.txt`.<br>
 
-4\. Open `xmbih.ini` in a text editor and hide menu items by entering a `1` value, and completely hide Global XMB categories with a `2` value.<br>
+4\. **If using Categories Lite:** Replace your `category_lite.prx` with the one bundled in the `.zip`.
 
-5\. Boot your PSP/Reset the VSH (XMB).
+5\. Open `xmbih.ini` in a text editor and hide menu items by entering a `1` value, and completely hide Global XMB categories with a `2` value.<br>
+
+6\. Boot your PSP/Reset the VSH (XMB).
 
 ## Bonus Features
 
