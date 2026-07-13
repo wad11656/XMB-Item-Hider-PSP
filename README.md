@@ -43,4 +43,4 @@ On ARK CFW, the `Extras` category holds three injected items: `Custom Firmware S
   - Safely hide the `Extras` category by changing your `Custom Firmware Settings` > `VSH Region` to one of the following:
 <br>`Latin America` `Hong Kong` `Taiwan` `Russia` `China` `Debug I`
 - Hiding `System Settings` with `SYSTEM = 1` or `HIDE_ALL_SETTINGS = 1` renders ARK menu items unresponsive.
-- When certain combinations of XMB categories are hidden, static UMD preview icons are blank the first time you hover on the UMD (but not on subsequent hovers).
+- When certain combinations of XMB categories are hidden, static UMD preview icons are blank.
