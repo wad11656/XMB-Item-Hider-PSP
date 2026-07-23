@@ -67,6 +67,9 @@ static struct {
 
 #define set cfg_store.flags
 
+
+
+
 /*
  * Hand-rolled libc replacements. Linking against newlib's libc.a on a
  * user-mode plugin pulls in __retarget_lock_*, _ctype_, _sbrk, etc., which
@@ -1250,6 +1253,33 @@ static int game_row_is_resume(int col, int row)
 	return 0;
 }
 
+/* Is the Game-column item at `row` a Memory Stick entry, by identity? The
+   media group (relocate low byte) is 7 for BOTH a plain msgshare_ms item and
+   Categories Lite's named gcv MS category. Reads the item live off the list --
+   no dependency on FindMediaRowFunc, which lags the wake media load on some Go
+   units and returns "not found" while a group-7 MS is still registering. */
+static int game_row_is_ms(int col, int row)
+{
+	SceVshItem *it = game_row_item_at(col, row);
+	return it && (it->relocate & 0xFF) == MS_MEDIA_GROUP;
+}
+
+/* Walk the Game column top-to-bottom and return the row of the FIRST (topmost)
+   Memory Stick item (media group 7), or -1 if none is registered yet. This is
+   our own group-7 lookup, used in preference to FindMediaRowFunc because the
+   latter is unreliable on the Go wake (returns -1 for a stretch even though a
+   gcv/msgshare_ms group-7 entry is present in the list). */
+static int find_ms_row_by_walk(int col, int count)
+{
+	int r;
+	if (count > 32)
+		count = 32;
+	for (r = 0; r < count; r++)
+		if (game_row_is_ms(col, r))
+			return r;
+	return -1;
+}
+
 
 /* START_AT_MEMORY_STICK: park the Game cursor back on Memory Stick whenever
    the msgshare_ms item (re)appears in the Game column after boot. Sleep/wake
@@ -1330,7 +1360,7 @@ static void maybe_jump_game_cursor_to_ms(SceVshItem *item, int topitem, int row)
    of wake gets pulled back to Memory Stick -- consistent with parking. */
 static int wake_park_thread(SceSize args, void *argp)
 {
-	int dispcol, tick, wake_on_resume, prev_count, settle;
+	int dispcol, tick, wake_on_resume, prev_count, settle, ms_stable = 0;
 	(void)args; (void)argp;
 
 	dispcol = adjust_topitem_for_hidden_categories(5);
@@ -1338,17 +1368,18 @@ static int wake_park_thread(SceSize args, void *argp)
 	prev_count = -1;       /* wait for the column to stop shifting before acting */
 	settle = 0;            /* consecutive ticks with an unchanged cell count */
 
-	/* Poll fast (4Hz for ~6s) so the cursor snaps back within a beat of
-	   ANY layout shift -- including the visible Memory Stick load-in --
-	   instead of trailing it on a fixed schedule. User-movement detector:
-	   an item insert changes the column's cell count (list+0x330) while
-	   shifting the cursor row; a user pressing up/down changes the row
-	   with the count unchanged. In the latter case stop interfering. */
-	for (tick = 0; tick < 24; tick++) {
+
+	/* Poll HARD and fast (~30Hz for ~6s) so the down-snap lands within a
+	   frame or two of the Go's wake re-registration dropping the cursor one
+	   row above Memory Stick -- at the old 4Hz the cursor sat visibly on the
+	   entry above MS for a quarter-second before we corrected it. We bail the
+	   instant the user touches the d-pad (stand-down below) or once we've
+	   landed on MS, so the tight loop never fights real navigation. */
+	for (tick = 0; tick < 200; tick++) {
 		u32 obj, arr, list;
 		int cur, count;
 
-		sceKernelDelayThread(250000);
+		sceKernelDelayThread(30000);
 		if (ms_boot_row < 0 || !scene_ctx || !TopcatPositionFunc)
 			break;
 		obj = *(u32 *)(scene_ctx + 0xA6C);
@@ -1381,6 +1412,31 @@ static int wake_park_thread(SceSize args, void *argp)
 			if (!(*(u32 *)((char *)scene_ctx + 0x14C) & 1)) {
 				break;
 			}
+
+			/* Probe "woke on Resume Game" on the EARLIEST on-Game tick -- the
+			   true woke position -- BEFORE the MS-loading early-continues below.
+			   Otherwise, on a CL Go where tick 0 bails waiting for Memory Stick,
+			   detection slips to a later tick by which the media re-registration
+			   has dragged the cursor onto Resume Game, and we misfire the bounce
+			   even though the user woke elsewhere. */
+			if (on_game && wake_on_resume < 0)
+				wake_on_resume = game_row_is_resume(dispcol, cur);
+
+			/* The user is navigating -- stand down. Once a physical d-pad
+			   direction is pressed, the wake park has done its job (or the user
+			   is deliberately leaving Game>Memory Stick), and continuing to snap
+			   would yank them back for the rest of the ~6s window. On a Go wake
+			   there's no disc-focus redirect and this is the only poller, so a
+			   direct read is safe. */
+			{
+				SceCtrlData wpad;
+				if (sceCtrlPeekBufferPositive(&wpad, 1) > 0 &&
+				    (wpad.Buttons & (PSP_CTRL_UP | PSP_CTRL_DOWN |
+					PSP_CTRL_LEFT | PSP_CTRL_RIGHT))) {
+					break;
+				}
+			}
+
 			/* Aim at Memory Stick's row (live group-7 lookup, else the
 			   boot-sampled row). Only act once that row actually EXISTS in the
 			   loaded column (count has grown past it): previously we rode the
@@ -1388,51 +1444,78 @@ static int wake_park_thread(SceSize args, void *argp)
 			   cursor onto each transient bottom item and read as a slow
 			   step-down. Instead wait, then do a single snap onto Memory Stick
 			   the moment it appears. */
-			int live = FindMediaRowFunc ?
-				FindMediaRowFunc((void *)scene_ctx, dispcol, MS_MEDIA_GROUP) : -1;
+			/* Locate the topmost Memory Stick row by IDENTITY (our own
+			   group-7 walk), preferring it over FindMediaRowFunc, which lags
+			   the Go wake media load and returns -1 while a group-7 MS is still
+			   registering -- that stale window is what dropped us onto the
+			   ms_boot_row fallback and, ultimately, Resume Game. */
+			int walk = find_ms_row_by_walk(dispcol, count);
+			int fmr = FindMediaRowFunc ? FindMediaRowFunc((void *)scene_ctx,
+					dispcol, MS_MEDIA_GROUP) : -1;
+			int live = (walk >= 0) ? walk : fmr;
 			int aim = (live >= 0) ? live : ms_boot_row;
-			int target;
+			int target, target_is_ms;
+
+			/* Wait for the column to STOP shifting before snapping. On a Go
+			   wake the list grows over several ticks and Memory Stick's row
+			   climbs with it (live 4->5, count 4->5->6); snapping on every tick
+			   chased that row down step-by-step -- and the instant paf snap,
+			   fired mid-rebuild, kept failing and falling back to the animated
+			   single-step, so the cursor visibly SCROLLED several rows instead
+			   of jumping. Hold until the count is stable (unchanged 2 ticks),
+			   then do ONE clean snap to the settled row. Fast 30ms polling keeps
+			   this to ~60ms past the media settling. */
+			if (count != prev_count) {
+				prev_count = count;
+				settle = 0;
+				continue;
+			}
+			if (++settle < 2)
+				continue;
 
 			if (live >= 0) {
-				/* Memory Stick located BY IDENTITY (group 7): act the INSTANT
-				   it's visible -- no settle wait -- so the cursor jumps to it as
-				   soon as it appears. FindMediaRowFunc returns the group-7 row,
-				   so this is always Memory Stick (never System Storage / Resume
-				   Game); if its row shifts as more cells load, the per-tick
-				   re-park below follows it. */
+				/* Memory Stick located by identity (group 7): the settled row. */
 				target = aim;
-			} else if (ms_boot_row >= 0 && count > ms_boot_row) {
-				/* CL: no group-7 item (MS is a category), so its row can only be
-				   guessed from the boot sample -- wait until the column has
-				   STOPPED shifting (count unchanged for 2 ticks) before snapping,
-				   so we don't land on a transient row (System Storage, Resume
-				   Game). The cursor rides with its item until then. */
-				if (count != prev_count) {
-					prev_count = count;
-					settle = 0;
-					continue;
-				}
-				if (++settle < 2)
-					continue;
+				target_is_ms = 1;
+			} else if (ms_boot_row >= 0 && count > ms_boot_row && settle >= 20) {
+				/* No group-7 MS anywhere after ~0.6s: genuine group-8-only
+				   layout. Best-effort fall back to the boot-sampled row. */
 				target = ms_boot_row;
+				target_is_ms = 0;
 			} else {
-				prev_count = count;   /* MS not ready yet -- wait */
-				continue;
+				continue;         /* keep waiting for group-7 MS to register */
 			}
 
 			/* Detect Resume Game FIRST (once, on the Game column), so the
 			   landed/snap logic below never misfires on it while the live MS-row
 			   lookup is momentarily unstable on a non-CL Go (it briefly returns
 			   Resume Game's own row). */
-			if (on_game && wake_on_resume < 0) {
-				sceKernelDelayThread(15000);
-				wake_on_resume = game_row_is_resume(dispcol, cur);
+			/* Landed on Memory Stick -> done. Never treat Resume Game as landed:
+			   target can transiently equal the stale ms_boot_row (a boot-time
+			   row number that, with a suspended game present on wake, now points
+			   at Resume Game), so cur==target could otherwise break the loop
+			   sitting on Resume Game and never finish the hop to Memory Stick. */
+			/* Landed only when the cursor is on a CONFIRMED Memory Stick row
+			   (group 7 by identity, re-checked live). This is what stops the
+			   premature landing: if the row we snapped to later shifts onto
+			   Resume Game / another item as the list finishes registering, the
+			   identity check fails and we keep correcting instead of exiting on
+			   a stale row. The group-8-only fallback can't prove MS by identity,
+			   so there it settles for "not Resume Game". */
+			if (on_game && wake_on_resume <= 0 && target >= 0 && cur == target &&
+			    (target_is_ms ? game_row_is_ms(dispcol, cur)
+					  : !game_row_is_resume(dispcol, cur))) {
+				/* On Memory Stick -- but the media may still be shuffling with
+				   the count unchanged, so this exact row can later flip to
+				   Resume Game. Require it to HOLD for ~0.3s before exiting; if
+				   the shuffle knocks the cursor off MS meanwhile, the reset
+				   below fires and we re-snap. */
+				if (++ms_stable >= 50) {   /* ~1.5s: outlast the late re-registration wave */
+					break;
+				}
+				continue;         /* on MS, still settling -- keep watching */
 			}
-
-			/* Landed on Memory Stick -> done. Never treat Resume Game as landed
-			   (wake_on_resume>0); that's handled by the bounce below. */
-			if (on_game && wake_on_resume <= 0 && target >= 0 && cur == target)
-				break;
+			ms_stable = 0;            /* off MS -- restart the settle timer */
 
 			/* Slept on another column? Once Memory Stick is ready, PRE-POSITION
 			   the Game column's cursor onto it in the background first, THEN
@@ -1443,7 +1526,8 @@ static int wake_park_thread(SceSize args, void *argp)
 			   skipped while Game isn't current, which is fine -- we only need
 			   the row set before the reveal.) */
 			if (!on_game) {
-				if (target >= 0 && NavigateTopMenuFunc && xmb_interactive()) {
+				if (target >= 0 && !game_row_is_resume(dispcol, target) &&
+				    NavigateTopMenuFunc && xmb_interactive()) {
 					scroll_game_col_to_row(dispcol, target);
 					NavigateTopMenuFunc((void *)scene_ctx, dispcol, target);
 				}
@@ -1502,13 +1586,19 @@ static int wake_park_thread(SceSize args, void *argp)
 				continue;
 			}
 
-			/* On Game, not yet on Memory Stick: snap toward it (unchanged). */
-			if (target >= 0 && cur != target) {
+			/* On Game, not yet on Memory Stick: snap toward it -- but NEVER onto
+			   Resume Game. target is only trustworthy as Memory Stick once the
+			   live group-7 lookup resolves; until then the ms_boot_row fallback
+			   (or a momentarily-unstable live lookup) can point at Resume Game.
+			   Skipping the snap in that case keeps the cursor put and lets the
+			   next tick snap it STRAIGHT to Memory Stick the instant its real
+			   row appears -- no Resume Game detour. */
+			if (target >= 0 && cur != target &&
+			    !game_row_is_resume(dispcol, target)) {
 				scroll_game_col_to_row(dispcol, target);
 			}
 		}
 	}
-
 
 	wake_park_thread_running = 0;
 	return 0;
@@ -2063,7 +2153,12 @@ char *music_category = "Music";
 char *video_category = "Video";
 char *game_category = "Game";
 char *network_category = "Network";
-char *playstation_network_category = "PlayStation\xAENetwork";
+/* UTF-8 ® (0xC2 0xAE) -- matches the [PlayStation®Network] header in the
+   shipped ini. The old value used a lone Latin-1 0xAE, which is a DIFFERENT
+   byte length, so minIni's section match (which checks name length first)
+   never found the section and every PSN item flag read as 0 -- nothing could
+   be hidden. See cfg_psn() for the Latin-1 fallback. */
+char *playstation_network_category = "PlayStation\xC2\xAENetwork";
 
 typedef struct
 {
@@ -2093,6 +2188,19 @@ void ClearCaches()
 int cfg(char *category, char *fmt)
 {
 	return ini_getlhex(category, fmt, 0, ini_path);
+}
+
+/* Read a [PlayStation®Network] key. The ® in that section header is
+   byte-fragile: the shipped ini is UTF-8 (0xC2 0xAE) but a text editor can
+   re-save it Latin-1 (0xAE). Try the UTF-8 header first; if the section isn't
+   found (distinguished by a -1 default), fall back to the Latin-1 header. Both
+   ASCII sibling sections match fine -- only this one carries a non-ASCII char. */
+int cfg_psn(char *fmt)
+{
+	int v = ini_getlhex(playstation_network_category, fmt, -1, ini_path);
+	if (v < 0)
+		v = ini_getlhex("PlayStation\xAENetwork", fmt, 0, ini_path);
+	return v;
 }
 
 static int text_field_matches(const char *field, const char *name, int size)
@@ -2985,7 +3093,6 @@ static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 
 	asm volatile("move %0, $t0" : "=r"(t0_arg));
 
-
 	adjusted_network_topitem = adjust_topitem_for_hidden_categories(6);
 
 	if (!hide_top_category(6) &&
@@ -3252,7 +3359,16 @@ void PatchVshMain(u32 text_addr)
 			_sw(0x10000013, text_addr + 0x2CE58);  /* b 0x2cea8 (FUN_0002cc9c) */
 			_sw(0x10000013, text_addr + 0x2E878);  /* b 0x2e8c8 (FUN_0002e2bc) */
 		}
-		MAKE_CALL(text_addr + 0x16538, NetworkDispatchPatched);
+		/* Only hook the network dispatcher when categories are actually hidden:
+		   both of NetworkDispatchPatched's remap branches require a hidden
+		   category, so at count==0 it's a pure passthrough whose hand-written
+		   asm trampoline (undeclared clobbers + cross-module jalr) wedges
+		   vshmain right after it returns during a theme rebuild -- the crash
+		   confirmed by the heartbeat freezing on mark=NET-ret. Leaving the stock
+		   jal in place at count==0 is exactly the passthrough behaviour, minus
+		   the crash. */
+		if (top_category_hidden_count > 0)
+			MAKE_CALL(text_addr + 0x16538, NetworkDispatchPatched);
 		/* Make media-item removal compaction-aware: wrap every call site of the
 		   remover (FUN_00023468) so it also clears the shifted column. */
 		RemoveMediaByRelocate = (int (*)(void *, int, int))(text_addr + 0x23468);
@@ -3391,6 +3507,9 @@ int module_start(SceSize args, void *argp)
 	strcpy(ini_path + strlen(ini_path), "xmbih.ini");
 
 
+
+
+
 	start_power_callbacks();
 
 	/* Global */
@@ -3490,9 +3609,9 @@ int module_start(SceSize args, void *argp)
 	set[50] = cfg(network_category, "GO_MESSENGER");
 
 	/* PlayStation�Network */
-	set[51] = cfg(playstation_network_category, "SIGN_UP_OR_ACCOUNT_MANAGEMENT");
-	set[52] = cfg(playstation_network_category, "PLAYSTATION_STORE");
-	set[53] = cfg(playstation_network_category, "INFORMATION_BOARD");
+	set[51] = cfg_psn("SIGN_UP_OR_ACCOUNT_MANAGEMENT");
+	set[52] = cfg_psn("PLAYSTATION_STORE");
+	set[53] = cfg_psn("INFORMATION_BOARD");
 
 	/** 
 	* Offsets for patches (for update use prxtool)
