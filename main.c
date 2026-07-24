@@ -1637,7 +1637,19 @@ static int disc_focus_settle_thread(SceSize args, void *argp)
 	   next 100ms tick steps it back up -- through every re-registration
 	   in the churn. Only acts while the target column stays focused. */
 	while ((int)(disc_settle_until - sceKernelGetSystemTimeLow()) > 0) {
-		sceKernelDelayThread(100000);
+		sceKernelDelayThread(50000);
+		/* The user is navigating -- relinquish. Once any d-pad direction is
+		   pressed the disc-focus settle has served its purpose (or the user is
+		   deliberately moving off the disc), so stop re-snapping to the UMD row
+		   for the rest of the ~1.8s window -- otherwise they can't navigate off
+		   Game>UMD for a couple seconds after it appears. */
+		{
+			SceCtrlData pad;
+			if (sceCtrlPeekBufferPositive(&pad, 1) > 0 &&
+			    (pad.Buttons & (PSP_CTRL_UP | PSP_CTRL_DOWN |
+				PSP_CTRL_LEFT | PSP_CTRL_RIGHT)))
+				break;
+		}
 		col = disc_settle_col;
 		if (!scene_ctx || col < 0 || !FindMediaRowFunc || !TopcatPositionFunc)
 			continue;
@@ -1701,7 +1713,12 @@ static void NavigateTopMenuAdjusted(void *ctx, int topitem, int row)
 			return;
 		}
 	}
-	if (live)
+	/* Only re-assert the disc row for MOVIE UMDs. Movie discs re-register up to
+	   3x, and that churn is what drops the cursor one row below the disc onto
+	   Memory Stick -- the mis-land this thread was written to correct (Video>
+	   UMD). A game UMD registers once and lands cleanly on Game>UMD, so arming
+	   the settle there only produced spurious snapbacks that fought the user. */
+	if (live && current_umd_is_video() > 0)
 		arm_disc_focus_settle(adj);
 
 	if (adj != topitem) {
@@ -1775,12 +1792,18 @@ static int boot_focus_thread(SceSize args, void *argp)
 		   distinct from the initial placement, and from a user pressing away
 		   toward some other column. The slide bounces once; the user's own
 		   presses come after and are left alone. */
-		int cap = start_at_ms_flag ? 66 : 12;
-		int poll = start_at_ms_flag ? 120000 : 250000;
+		int cap = start_at_ms_flag ? 133 : 12;
+		int poll = start_at_ms_flag ? 60000 : 250000;
 		int on_game = 0;                   /* Game has settled at least once */
 		int bounces = 0;                   /* slide bounces corrected */
+		/* This is the SINGLE controller poller during boot (a second concurrent
+		   poller freezes input). Poll fast (60ms) so a user d-pad press sets
+		   boot_user_nav quickly and every boot snapback stands down promptly. The
+		   slide-settle timeout is kept TIME-based (not iteration-based) so the
+		   faster cadence doesn't shorten the anti-slide protection window. */
+		u32 bf_start = sceKernelGetSystemTimeLow();
 
-		for (i = 0; i < cap; i++) {         /* START_AT ~8s @120ms, else ~3s @250ms */
+		for (i = 0; i < cap; i++) {         /* START_AT ~8s @60ms, else ~3s @250ms */
 			int video_disp = -1;
 
 			if (!scene_ctx || !NavigateTopMenuFunc || hide_top_category(5))
@@ -1815,7 +1838,9 @@ static int boot_focus_thread(SceSize args, void *argp)
 				   (hardware log: est latched at ~t56, Up at ~t63, slide to PSN
 				   at ~t65 after we'd already quit). */
 				int slide_settled = (bounces >= 1) ||
-					(game_disp == slide_target) || (i >= 50);
+					(game_disp == slide_target) ||
+					((int)(sceKernelGetSystemTimeLow() - bf_start)
+						>= 6000000);   /* ~6s safety timeout */
 				if (boot_user_nav && boot_ms_established && slide_settled) {
 					break;
 				}
@@ -2090,11 +2115,14 @@ static int start_at_ms_thread(SceSize args, void *argp)
 			for (j = 0; j < 100; j++) {   /* ~10s cap */
 				u32 ar, ls;
 				int cnt, msr, c;
-				/* Stop holding MS once the user is navigating AND the slide has
-				   settled. An early press before settle keeps holding so Game>MS
-				   is established first. In config A, also keep holding through
-				   the MS-wins window so the native disc snap is countered. */
-				if (boot_user_nav && boot_ms_established && j >= ms_win)
+				/* Stop holding MS the instant the user navigates (once Game>MS is
+				   established). A d-pad press ALWAYS short-circuits the hold -- it
+				   no longer waits out the config-A MS-wins window, which was
+				   snapping the cursor back to Game>MS for ~4s after the user tried
+				   to move. The passive MS-wins hold (countering the native UMD snap
+				   when the user is NOT pressing) is preserved by the j<ms_win gate
+				   on the UMD re-snap and the natural-exit test below. */
+				if (boot_user_nav && boot_ms_established)
 					break;
 				obj = *(u32 *)(scene_ctx + 0xA6C);
 				ar = obj ? *(u32 *)(obj + 0x360) : 0;
@@ -2116,7 +2144,7 @@ static int start_at_ms_thread(SceSize args, void *argp)
 					SceVshItem *it = force ? (SceVshItem *)0 :
 						game_row_item_at(gcol, c);
 					if (force || (it && (!strcmp(it->text, "msg_em") ||
-					    (keep_ms && j < ms_win &&
+					    (keep_ms && !boot_user_nav && j < ms_win &&
 					     !strcmp(it->text, "msgshare_umd"))))) {
 						ms_boot_row = msr;
 						scroll_game_col_to_row(gcol, msr);
