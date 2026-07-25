@@ -1893,10 +1893,19 @@ static int boot_focus_thread(SceSize args, void *argp)
 				   other columns (hardware: navigating to col 3 while slide_tgt=5
 				   got yanked back). The slide always clamps to slide_target, so
 				   this still catches it and lands on Game>MS. */
+				/* The video_disp catch is for the programmatic START_AT
+				   disc-focus jump to Video, which ALWAYS happens before the user
+				   touches the d-pad. Once a real press is registered
+				   (boot_user_nav), a cursor sitting on video_disp is the user
+				   having pressed LEFT off Game>MS onto Video -- NOT the disc focus
+				   -- so do not yank them back. This was the cold-boot LEFT
+				   bounceback with categories left of Game hidden (Video's displayed
+				   column lands exactly on video_disp). */
 				int should = !navigated ||
 					(cur_col == slide_target &&
 					 game_disp != slide_target) ||
-					(video_disp >= 0 && cur_col == video_disp);
+					(video_disp >= 0 && cur_col == video_disp &&
+					 !boot_user_nav);
 
 				if (should) {
 					/* Count only a settled departure to the slide's clamp
@@ -3145,6 +3154,13 @@ static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 			a1 = 7;
 	}
 
+	/* jalr into vshmain clobbers every caller-saved register. Declare them ALL
+	   (esp. $ra -- the return address -- and $t/$a/$v1/$at) so the compiler does
+	   not keep a live value in any of them across this block. The previous list
+	   ("memory" only) let the compiler cache values in caller-saved regs that the
+	   call destroyed, wedging vshmain on the theme-rebuild path at count>0. Inputs
+	   are forced into callee-saved regs, which the call preserves. $v0 is NOT
+	   clobbered: it carries the return we immediately capture into %0. */
 	asm volatile(
 		"move $a0, %1\n"
 		"move $a1, %2\n"
@@ -3157,7 +3173,9 @@ static int NetworkDispatchPatched(void *ctx, int a1, int a2, int a3)
 		: "=r"(ret)
 		: "r"(ctx), "r"(a1), "r"(a2), "r"(mapped_a3), "r"(t0_arg),
 		  "r"(NetworkDispatchFunc)
-		: "memory");
+		: "memory", "at", "v1", "a0", "a1", "a2", "a3",
+		  "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9",
+		  "ra");
 
 	return ret;
 }
@@ -3353,11 +3371,25 @@ void PatchVshMain(u32 text_addr)
 		   textures. Move both the slot counter and the queue pointer back to
 		   the queue head. Network resolves 7 usable entries on this firmware
 		   (indices 252,253,255,256,257,258,259), so extend the loader window
-		   to 7 now that it starts from the correct head. */
+		   to 7 now that it starts from the correct head.
+
+		   Gate on count>0: Network is only ever shifted (and thus needs this
+		   re-head + widening) when a category before it is hidden. At count==0
+		   Network sits at its stock slot and the stock 5-window loads correctly.
+		   Applying the widened 7-window at count==0 while PSN items are HIDDEN
+		   (msg_signup/msg_ps_store removed from the queue) walks the loader past
+		   the now-shortened queue into garbage during a theme rebuild -- the
+		   count==0 theme-change crash. Leaving the stock window there avoids it. */
+		/* CRASH-ISOLATION TEST (count>0 theme-change): widening fully disabled to
+		   confirm this widened network icon-finalize loop (FUN_0002cc9c) is what
+		   over-walks a half-built network queue during a theme rebuild. Restore to
+		   `top_category_hidden_count > 0` once confirmed. */
+		if (0) {
 		_sw(0x00609021, text_addr + 0x2CE30);  /* move   s2, v1 */
 		_sw(0x24100000, text_addr + 0x2CE40);  /* addiu  s0, zr, 0 */
 		_sw(0x00A03821, text_addr + 0x2CE78);  /* move   a3, a1 */
 		_sw(0x2A220007, text_addr + 0x2CE94);  /* slti  v0, s1, 7 */
+		}
 		/* THE single-hide crash: FUN_0002cc9c (this same hardcoded col-6 network
 		   icon-finalize loop, called right after the 0x208xx column renderer) is
 		   what actually freezes the boot. With network hidden AND exactly one
@@ -3373,11 +3405,16 @@ void PatchVshMain(u32 text_addr)
 		   either way. Multi-hide (count<=6) keeps the stock conditional branch. */
 		/* FUN_0002e2bc's category-6 (network) icon-finalize block: widen its
 		   window to 7 from the queue head so a visible-but-shifted Network
-		   resolves all its icons. */
+		   resolves all its icons. Gated on count>0 for the same reason as the
+		   FUN_0002cc9c widening above: at count==0 the stock window is correct
+		   and the widened one over-walks a PSN-shortened queue on theme rebuild. */
+		/* CRASH-ISOLATION TEST: disabled alongside the FUN_0002cc9c widening. */
+		if (0) {
 		_sw(0x00608821, text_addr + 0x2E854);  /* move   s1, v1 */
 		_sw(0x24100000, text_addr + 0x2E858);  /* addiu  s0, zr, 0 */
 		_sw(0x00A03821, text_addr + 0x2E89C);  /* move   a3, a1 */
 		_sw(0x2A820007, text_addr + 0x2E8B4);  /* slti  v0, s4, 7 */
+		}
 		/* Single-hide (count==1): the network icon queue is garbage in the
 		   count==7 layout, so skip BOTH hardcoded col-6 network finalize loops
 		   that would walk it -- FUN_0002cc9c (boot crash) at 0x2CE58 and the
