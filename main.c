@@ -44,6 +44,39 @@
    directly by boot_focus_thread); stands the boot Memory-Stick park/hold
    down so the user's own navigation is never fought. */
 static volatile int boot_user_nav = 0;
+/* Count of top categories hidden with "2" (tentative decl; defined once below).
+   Declared early so AddVshItemFilter can consult it for the Adrenaline shift. */
+static int top_category_hidden_count;
+/* Set at patch time when EPI-XmbControl (Adrenaline's XMB patcher) is present.
+   On Adrenaline every AddVshItem is routed through the prologue chokepoint
+   (AddVshItemFilter), bypassing the callsite wrappers that normally shift an
+   item's column index for hidden categories -- so the filter must do that shift
+   itself. On real ARK this stays 0 and the filter leaves normal items alone. */
+static int g_adrenaline;
+/* Set by a callsite wrapper immediately before it forwards an item to the real
+   AddVshItem, so the prologue filter knows this item was ALREADY shifted+hidden
+   by the wrapper and must not re-process it (double-shift/wrong-drop on
+   Adrenaline). The filter reads and clears it on entry. */
+static int g_from_wrapper;
+/* START_AT re-add context (tentative decls; defined with initializers below).
+   Declared early so AddVshItemFilter can capture them on Adrenaline, where the
+   patch[1] wrapper that normally captures them is bypassed. */
+static volatile void *game_a0;
+static volatile int game_topitem;
+static volatile int game_ctx_captured;
+
+/* Thread creation compatible with Adrenaline. On Adrenaline the plugin is loaded
+   high in USER space (~0x09ff0000) but these spawns run from a kernel-ish
+   context, where attr 0 makes a KERNEL thread and sceKernelCreateThread rejects
+   the user entry with ILLEGAL_ADDR (0x800200d3). PSP_THREAD_ATTR_USER makes a
+   user thread it accepts. On real PSP attr 0 is the long-established value, so
+   keep it there. g_adrenaline is set in PatchVshMain, before any of these spawn. */
+static SceUID xmbih_create_thread(const char *name,
+	int (*entry)(SceSize, void *), int prio, int stack)
+{
+	return sceKernelCreateThread(name, entry, prio, stack,
+		g_adrenaline ? 0x80000000 /* PSP_THREAD_ATTR_USER */ : 0, NULL);
+}
 /* True while the boot MS park/settle owns Memory-Stick parking; maybe_jump
    stands down until it clears so its msgshare_ms re-add snaps don't fight the
    boot park or the user's own navigation during the settle. */
@@ -57,6 +90,66 @@ static volatile int boot_ms_established = 0;
 #include <stdarg.h>
 #include "minGlue.h"
 #include "minIni.h"
+
+/* ===================== ADRENALINE COMPAT PROBE (temporary) =====================
+   Dependency-free flushed logging to ms0:/seplugins/xmbih_probe.log (= ux0:pspemu/
+   seplugins/xmbih_probe.log on Adrenaline). Remove this block + call sites to ship. */
+#define PROBE_BUILD 0
+#if PROBE_BUILD
+#define PROBE_LOG_PATH "ms0:/seplugins/xmbih_probe.log"
+
+static void probe_write(const char *buf, int len)
+{
+	SceUID fd = sceIoOpen(PROBE_LOG_PATH,
+		PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
+	if (fd >= 0) { sceIoWrite(fd, buf, len); sceIoClose(fd); }
+}
+
+static void probe_logs2(const char *a, const char *b)
+{
+	char buf[192]; int i = 0, k = 0;
+	while (a[k] && i < 80) buf[i++] = a[k++];
+	k = 0;
+	while (b[k] && i < 185) buf[i++] = b[k++];
+	buf[i++] = '\n';
+	probe_write(buf, i);
+}
+
+static void probe_logs(const char *msg) { probe_logs2(msg, ""); }
+
+static void probe_logx(const char *tag, u32 v)
+{
+	char buf[128]; int i = 0, k = 0, j;
+	while (tag[k] && i < 100) buf[i++] = tag[k++];
+	buf[i++] = '='; buf[i++] = '0'; buf[i++] = 'x';
+	for (j = 28; j >= 0; j -= 4) {
+		int d = (v >> j) & 0xF;
+		buf[i++] = (char)(d < 10 ? ('0' + d) : ('a' + d - 10));
+	}
+	buf[i++] = '\n';
+	probe_write(buf, i);
+}
+
+static int probe_item_n = 0;   /* count of AddVshItem calls logged during render */
+
+static void probe_logti(const char *pfx, const char *text, int v)
+{
+	char buf[192]; int i = 0, k = 0, j; u32 uv;
+	while (pfx[k] && i < 40) buf[i++] = pfx[k++];
+	k = 0;
+	while (text[k] && i < 150) buf[i++] = text[k++];
+	buf[i++] = ' '; buf[i++] = 't'; buf[i++] = '=';
+	if (v < 0) { buf[i++] = '-'; uv = (u32)(-v); } else uv = (u32)v;
+	buf[i++] = '0'; buf[i++] = 'x';
+	for (j = 28; j >= 0; j -= 4) {
+		int d = (uv >> j) & 0xF;
+		buf[i++] = (char)(d < 10 ? ('0' + d) : ('a' + d - 10));
+	}
+	buf[i++] = '\n';
+	probe_write(buf, i);
+}
+#endif /* PROBE_BUILD */
+/* =================== END ADRENALINE COMPAT PROBE (temporary) =================== */
 
 PSP_MODULE_INFO("XMBIH", 0x0007, 1, 3);
 
@@ -316,6 +409,60 @@ static volatile int captured_ark_count = 0;
 int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 {
 	int adjusted_topitem = topitem;
+	/* Was this item forwarded by a callsite wrapper (already shifted+hidden)?
+	   Read and clear before anything else so it never leaks to the next add. */
+	int from_wrapper = g_from_wrapper;
+	g_from_wrapper = 0;
+
+	/* Adrenaline: the patch[1] wrapper (AddVshItemPatched) that normally captures
+	   the START_AT re-add context is bypassed here, so capture it in the filter.
+	   Without this, game_ctx_captured stays 0, the worker thread's re-add is
+	   skipped, and the boot-hidden Game items (Game Sharing / Saved Data / UMD)
+	   never come back. Use the NATIVE topitem -- the re-add re-enters this filter,
+	   which applies the hidden-category shift. */
+	if (g_adrenaline && boot_hide_for_ms && !game_ctx_captured && item &&
+	    (!strcmp(item->text, "msgtop_game_gamedl") ||
+	     !strcmp(item->text, "msgtop_game_savedata") ||
+	     !strcmp(item->text, "msgshare_umd"))) {
+		game_a0 = a0;
+		game_topitem = topitem;
+		game_ctx_captured = 1;
+#if PROBE_BUILD
+		probe_logti("GAMECTX-SET ", item->text, topitem);
+#endif
+	}
+
+#if PROBE_BUILD
+	/* Log EVERY item reaching the filter with its NATIVE topitem (before any
+	   drop/shift), so a navigation-time trace shows media items too. */
+	if (probe_item_n < 300) {
+		probe_item_n++;
+		probe_logti("filt: ", item ? item->text : "(null)", topitem);
+	}
+#endif
+
+	/* Adrenaline: EPI-XmbControl funnels every AddVshItem through this prologue,
+	   bypassing the callsite wrappers that normally shift a normal item's column
+	   for hidden categories. Items therefore arrive with NATIVE topitems and
+	   would land in the wrong (uncompacted) column -- Game(5)->PSN slot, Network
+	   (6)/PSN(7) off the end. Apply the hidden-category shift here. ARK items are
+	   handled by the is_ark block below; MS re-add items keep their own path. */
+	if (!from_wrapper && g_adrenaline && top_category_hidden_count > 0 && item &&
+	    !is_ark_custom_item(item->text)) {
+		/* Drop every item belonging to a fully-hidden ("2") category. Their
+		   per-category wrapper (which would skip() them with the right location)
+		   is bypassed on Adrenaline, and this filter's skip(item,0) can't match
+		   the location-specific Memory-Stick/System-Storage rules -- so without
+		   this, a hidden category's MS/SysStorage items leak into the adjacent
+		   compacted column (e.g. Music's Memory Stick showing under Video). */
+		if (hide_top_category(topitem)) {
+#if PROBE_BUILD
+			probe_logs2("  DROP ", item ? item->text : "(null)");
+#endif
+			return 0;
+		}
+		adjusted_topitem = adjust_topitem_for_hidden_categories(topitem);
+	}
 
 	/* Race mitigation: yield per add so our re-add/scroll below never runs
 	   ahead of vshmain's list rebuild during Settings/USB transitions. */
@@ -789,8 +936,8 @@ static int power_callback(int unknown, int powerInfo, void *arg)
 	if ((powerInfo & PSP_POWER_CB_RESUME_COMPLETE) && start_at_ms_flag &&
 	    !wake_park_thread_running &&
 	    !(scene_ctx && !(*(u32 *)((char *)scene_ctx + 0x14C) & 1))) {
-		SceUID tid = sceKernelCreateThread("xmbih_wakepark",
-			wake_park_thread, 0x18, 0x1000, 0, NULL);
+		SceUID tid = xmbih_create_thread("xmbih_wakepark",
+			wake_park_thread, 0x18, 0x1000);
 		/* Same disc-present gate as the boot window: only a disc that is
 		   in the drive AT WAKE has its re-registrations redirected; a
 		   disc inserted after a disc-less wake jumps natively. */
@@ -1011,8 +1158,8 @@ static int maybe_defer_boot_umd_add(void *a0, int topitem, SceVshItem *item)
 
 	if (!boot_umd_defer_thread_started) {
 		boot_umd_defer_thread_started = 1;
-		tid = sceKernelCreateThread("xmbih_boot_umd",
-			boot_umd_readd_thread, 0x18, 0x1000, 0, NULL);
+		tid = xmbih_create_thread("xmbih_boot_umd",
+			boot_umd_readd_thread, 0x18, 0x1000);
 		if (tid >= 0)
 			sceKernelStartThread(tid, 0, NULL);
 	}
@@ -1672,8 +1819,8 @@ static void arm_disc_focus_settle(int col)
 	disc_settle_col = col;
 	disc_settle_until = sceKernelGetSystemTimeLow() + 1800000;
 	if (!disc_settle_running) {
-		SceUID tid = sceKernelCreateThread("xmbih_discsettle",
-			disc_focus_settle_thread, 0x18, 0x1000, 0, NULL);
+		SceUID tid = xmbih_create_thread("xmbih_discsettle",
+			disc_focus_settle_thread, 0x18, 0x1000);
 		if (tid >= 0) {
 			disc_settle_running = 1;
 			sceKernelStartThread(tid, 0, NULL);
@@ -1841,7 +1988,12 @@ static int boot_focus_thread(SceSize args, void *argp)
 					(game_disp == slide_target) ||
 					((int)(sceKernelGetSystemTimeLow() - bf_start)
 						>= 6000000);   /* ~6s safety timeout */
-				if (boot_user_nav && boot_ms_established && slide_settled) {
+				/* Adrenaline: release the moment the user navigates (no slide-
+				   settle wait) so a d-pad press immediately relinquishes the
+				   column watchdog -- the boot slide there doesn't need the 6s
+				   guard, and holding through it caused the bounceback. */
+				if (boot_user_nav && boot_ms_established &&
+				    (slide_settled || g_adrenaline)) {
 					break;
 				}
 			}
@@ -1901,9 +2053,19 @@ static int boot_focus_thread(SceSize args, void *argp)
 				   -- so do not yank them back. This was the cold-boot LEFT
 				   bounceback with categories left of Game hidden (Video's displayed
 				   column lands exactly on video_disp). */
+				/* Adrenaline: the boot cursor drifts to an INTERMEDIATE column
+				   right of Game (not the exact slide_target), which the narrow
+				   slide_target/video_disp checks miss, so it took ~8s to reach
+				   Game. Blanket-assert Game from ANY column until the user presses
+				   -- safe here because a press now releases this watchdog
+				   immediately (see the boot_user_nav break above). This makes the
+				   snap onto Game>Memory Stick near-instant even with Network/PSN
+				   still visible to the right. */
 				int should = !navigated ||
+					(g_adrenaline && !boot_user_nav) ||
 					(cur_col == slide_target &&
-					 game_disp != slide_target) ||
+					 game_disp != slide_target &&
+					 !(g_adrenaline && boot_user_nav)) ||
 					(video_disp >= 0 && cur_col == video_disp &&
 					 !boot_user_nav);
 
@@ -1967,6 +2129,12 @@ static int start_at_ms_thread(SceSize args, void *argp)
 	   keep maybe_jump out of the way until we're done (cleared at the end). */
 	boot_settling = 1;
 
+#if PROBE_BUILD
+	probe_logs("READD thread START");
+	probe_logx("scene_ctx@start", scene_ctx);
+	probe_logx("start_ms_game_index", (u32)start_ms_game_index);
+#endif
+
 	/* Wait for the XMB-ready signal: the scene's current top-category field
 	   (obj+0x338) reaches the Game column's displayed index when Game is
 	   focused, which happens just after the cursor is placed -- so re-adding
@@ -1980,7 +2148,14 @@ static int start_at_ms_thread(SceSize args, void *argp)
 		if (!boot_hide_for_ms)
 			break;
 		if (scene_ctx) {
+#if PROBE_BUILD
+			if (i == 0) probe_logx("poll deref addr", scene_ctx + 0xA6C);
+#endif
 			obj = *(u32 *)(scene_ctx + 0xA6C);
+#if PROBE_BUILD
+			if ((i % 12) == 0 && obj) probe_logx("poll top338",
+				(u32)*(int *)(obj + 0x338));
+#endif
 			if (obj && *(int *)(obj + 0x338) == start_ms_game_index)
 				break;
 		}
@@ -1994,6 +2169,12 @@ static int start_at_ms_thread(SceSize args, void *argp)
 	   filter via the prologue patch; boot_hide_for_ms is now clear so they
 	   pass through and get added.) */
 	boot_hide_for_ms = 0;
+#if PROBE_BUILD
+	probe_logx("READD thread reached; poll_i", (u32)i);
+	probe_logx("READD game_ctx_captured", (u32)game_ctx_captured);
+	probe_logx("READD gamedl_captured", (u32)gamedl_captured);
+	probe_logx("READD game_topitem", (u32)game_topitem);
+#endif
 	if (game_ctx_captured) {
 		int k;
 		/* Re-add the relocated ARK CFW items FIRST so they land at the TOP of
@@ -2576,7 +2757,10 @@ int skip(SceVshItem *item, int location)
 	   from vshmain's runtime context -- the same context the (working)
 	   scene-dump thread was created from. Creating it from OnModuleStart
 	   (much earlier) produced a thread that never ran. */
-	if (start_at_ms_flag && !ms_thread_started) {
+	/* On Adrenaline this item-walk context rejects sceKernelCreateThread
+	   (0x800200d3), so the thread is instead created from PatchVshMain (see
+	   spawn_readd_thread). Only use the lazy skip() spawn off Adrenaline. */
+	if (!g_adrenaline && start_at_ms_flag && !ms_thread_started) {
 		SceUID tid;
 		ms_thread_started = 1;
 		tid = sceKernelCreateThread("xmbih_show_savedata",
@@ -2596,8 +2780,8 @@ int skip(SceVshItem *item, int location)
 	    !boot_focus_thread_started) {
 		SceUID tid;
 		boot_focus_thread_started = 1;
-		tid = sceKernelCreateThread("xmbih_boot_focus",
-			boot_focus_thread, 0x18, 0x1000, 0, NULL);
+		tid = xmbih_create_thread("xmbih_boot_focus",
+			boot_focus_thread, 0x18, 0x1000);
 		if (tid >= 0)
 			sceKernelStartThread(tid, 0, NULL);
 	}
@@ -2908,6 +3092,13 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 	int incoming_topitem = topitem;
 	int add_topitem;
 
+#if PROBE_BUILD
+	if (probe_item_n < 300) {
+		probe_item_n++;
+		probe_logti("wrap: ", item ? item->text : "(null)", topitem);
+	}
+#endif
+
 	{
 		int adjusted_topitem;
 
@@ -2947,7 +3138,7 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(0, item))
-		return AddVshItem(a0, add_topitem, item);
+		{ g_from_wrapper = 1; return AddVshItem(a0, add_topitem, item); }
 
 	return 0;
 }
@@ -2961,7 +3152,7 @@ int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(1, item))
-		return AddVshItem(a0, topitem, item);
+		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
 
 	return 0;
 }
@@ -2975,13 +3166,17 @@ int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(2, item))
-		return AddVshItem(a0, topitem, item);
+		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
 
 	return 0;
 }
 
 int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 {
+#if PROBE_BUILD
+	if (probe_item_n < 300) { probe_item_n++;
+		probe_logti("wVid: ", item ? item->text : "(null)", topitem); }
+#endif
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 3, topitem);
 	if (maybe_suppress_media_readd(item, 3, topitem))
@@ -2989,13 +3184,17 @@ int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(3, item))
-		return AddVshItem(a0, topitem, item);
+		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
 
 	return 0;
 }
 
 int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 {
+#if PROBE_BUILD
+	if (probe_item_n < 300) { probe_item_n++;
+		probe_logti("wGame: ", item ? item->text : "(null)", topitem); }
+#endif
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 4, topitem);
 	if (maybe_suppress_media_readd(item, 4, topitem))
@@ -3003,7 +3202,7 @@ int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(4, item))
-		return AddVshItem(a0, topitem, item);
+		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
 
 	return 0;
 }
@@ -3017,7 +3216,7 @@ int AddVshItemPatchedGameSavedataMs(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(5, item))
-		return AddVshItem(a0, topitem, item);
+		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
 
 	return 0;
 }
@@ -3031,7 +3230,7 @@ int AddVshItemPatchedGameSavedataEf(void *a0, int topitem, SceVshItem *item)
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(6, item))
-		return AddVshItem(a0, topitem, item);
+		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
 
 	return 0;
 }
@@ -3050,7 +3249,7 @@ static int UmdVideoAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 	if (maybe_suppress_media_readd(item, 3, adjusted_topitem))
 		return 0;
 
-	return AddVshItem(a0, adjusted_topitem, item);
+	{ g_from_wrapper = 1; return AddVshItem(a0, adjusted_topitem, item); }
 }
 
 static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
@@ -3062,7 +3261,7 @@ static int UmdGameAddPatchedRet(void *a0, int topitem, SceVshItem *item)
 	if (maybe_suppress_media_readd(item, 4, adjusted_topitem))
 		return 0;
 
-	return AddVshItem(a0, adjusted_topitem, item);
+	{ g_from_wrapper = 1; return AddVshItem(a0, adjusted_topitem, item); }
 }
 
 static int UmdVideoSelectShiftPatched(void *ctx, int topitem)
@@ -3243,6 +3442,28 @@ static int IconGetTexWrap(void *buf, void *atlas, void *entry)
 
 void PatchVshMain(u32 text_addr)
 {
+	/* Adrenaline (PSP-emu on PS Vita) ships EPI-XmbControl, which HIJACKs the
+	   AddVshItem prologue at text_addr+0x22648 -- the SAME address our Layer-2
+	   prologue patch targets (patch[0]). On real ARK, xmbctrl patches the
+	   CALLSITE instead, so the two coexist; on Adrenaline both fight over the
+	   prologue and the XMB crashes while building items. When EPI-XmbControl is
+	   present, skip our prologue patch and rely on the callsite wrapper path so
+	   we don't collide. (EPI-XmbControl has already started by the time
+	   vsh_module -- and thus this function -- runs, so it is findable here.) */
+	int adrenaline_present;
+	{
+		SceModule2 epi;
+		adrenaline_present =
+			(kuKernelFindModuleByName("EPI-XmbControl", &epi) >= 0);
+	}
+	g_adrenaline = adrenaline_present;
+
+#if PROBE_BUILD
+	probe_logs("== PatchVshMain enter (fix build) ==");
+	probe_logx("text_addr", text_addr);
+	probe_logx("adrenaline_present", (u32)adrenaline_present);
+#endif
+
 	vsh_text_addr = text_addr;
 
 	/* Capture whatever the patch[1] JAL currently points at -- the real
@@ -3258,7 +3479,11 @@ void PatchVshMain(u32 text_addr)
 
 
 	/* Prologue-patch the real AddVshItem (Layer 2). Filters xmbctrl's
-	   forwarded trigger item so even the first trigger is hideable. */
+	   forwarded trigger item so even the first trigger is hideable.
+	   Applied on Adrenaline too: EPI-XmbControl HIJACKs this same prologue but
+	   does so AFTER us, capturing our jump into its trampoline, so the two chain
+	   (EPI wrapper -> our filter -> real) rather than collide. Skipping it broke
+	   item column-compaction, so it must run. */
 	xmbctrl_triggered = 0;
 	{
 		u32 real_addvsh = text_addr + patch[0];
@@ -3271,15 +3496,27 @@ void PatchVshMain(u32 text_addr)
 		_sw(0, real_addvsh + 4);
 	}
 
+#if PROBE_BUILD
+	probe_logs("M1: after capture, pre first write (MAKE_CALL patch1)");
+#endif
 	/* Permanently items */
 	MAKE_CALL(text_addr + patch[1], AddVshItemPatched);
+#if PROBE_BUILD
+	probe_logs("M2: after MAKE_CALL patch1 (first vshmain write OK)");
+#endif
 
 	if (topcat_count_patch) {
 		MAKE_CALL(text_addr + topcat_count_patch, AdjustTopCategoryCountAndGetCount);
 		_sw(0x02402021, text_addr + topcat_count_patch + 4);
 	}
+#if PROBE_BUILD
+	probe_logs("M3: after topcat_count patch");
+#endif
 
 	if (devkit == FW(0x660)) {
+#if PROBE_BUILD
+		probe_logs("M4: entered FW(0x660) block");
+#endif
 		TopcatSelectShiftedFunc = (int (*)(void *, int, int))(text_addr + 0x22998);
 		TopcatPositionFunc = (int (*)(void *, int))(text_addr + 0x3F4E0);
 		/* paf list primitives for the post-boot park-on-Memory-Stick jump
@@ -3306,6 +3543,9 @@ void PatchVshMain(u32 text_addr)
 		}
 		/* Disc-focus column fix: the only 0x2240C caller (see
 		   NavigateTopMenuAdjusted). */
+#if PROBE_BUILD
+		probe_logs("M5: pre MAKE_CALL 0x222FC (NavigateTopMenuAdjusted)");
+#endif
 		MAKE_CALL(text_addr + 0x222FC, NavigateTopMenuAdjusted);
 		/* NOTE: adjusting the FUN_0002128C row-lookup callsites inside
 		   FUN_0002220C (0x22254/0x22310/0x22338) made the compacted
@@ -3364,6 +3604,9 @@ void PatchVshMain(u32 text_addr)
 		MAKE_CALL(text_addr + 0x23170, UmdTopcatPositionShiftPatched);
 		MAKE_CALL(text_addr + 0x231A8, UmdTopcatPositionShiftPatched);
 		MAKE_CALL(text_addr + 0x2261C, TrackColumnIconKeyPatched);
+#if PROBE_BUILD
+		probe_logs("M6: after UMD/Track batch, pre network/widening");
+#endif
 
 		/* Both Network-only preload loops are hardcoded to a 5-slot window.
 		   When left-side category compaction shifts Network, the active early
@@ -3434,6 +3677,9 @@ void PatchVshMain(u32 text_addr)
 		   the crash. */
 		if (top_category_hidden_count > 0)
 			MAKE_CALL(text_addr + 0x16538, NetworkDispatchPatched);
+#if PROBE_BUILD
+		probe_logs("M6a: after count==1 skip + net-dispatch install");
+#endif
 		/* Make media-item removal compaction-aware: wrap every call site of the
 		   remover (FUN_00023468) so it also clears the shifted column. */
 		RemoveMediaByRelocate = (int (*)(void *, int, int))(text_addr + 0x23468);
@@ -3465,6 +3711,9 @@ void PatchVshMain(u32 text_addr)
 		MAKE_CALL(text_addr + 0x2a418, RemoveMediaShiftWrap);
 		MAKE_CALL(text_addr + 0x2a428, RemoveMediaShiftWrap);
 		MAKE_CALL(text_addr + 0x2ae4c, RemoveMediaShiftWrap);
+#if PROBE_BUILD
+		probe_logs("M6b: after RemoveMediaShiftWrap batch");
+#endif
 		/* FIX: wrap the disc-preview "asset needed?" check at all 12 sites to
 		   force the ICON0 load when categories are hidden. */
 		DiscAssetNeeded = (int (*)(void *, int))(text_addr + 0x26334);
@@ -3483,20 +3732,38 @@ void PatchVshMain(u32 text_addr)
 		MAKE_CALL(text_addr + 0x1af54, DiscAssetNeededWrap);
 		IconGetTex = (int (*)(void *, void *, void *))(text_addr + 0x2D7D4);
 		MAKE_CALL(text_addr + 0x2D8A0, IconGetTexWrap);
+#if PROBE_BUILD
+		probe_logs("M6c: after DiscAsset/IconGetTex batch (FW block tail)");
+#endif
 
 	}
 
+#if PROBE_BUILD
+	probe_logs("P2: pre patch[2] Photo MS");
+#endif
 	/* Photo Memory Stick */
 	MAKE_CALL(text_addr + patch[2], AddVshItemPatchedPhoto);
+#if PROBE_BUILD
+	probe_logs("P3: pre patch[3] Music MS");
+#endif
 
 	/* Music Memory Stick */
 	MAKE_CALL(text_addr + patch[3], AddVshItemPatchedMusic);
+#if PROBE_BUILD
+	probe_logs("P4: pre patch[4] Video MS");
+#endif
 
 	/* Video Memory Stick */
 	MAKE_CALL(text_addr + patch[4], AddVshItemPatchedVideo);
+#if PROBE_BUILD
+	probe_logs("P5: pre patch[5] Game MS");
+#endif
 
 	/* Game Memory Stick */
 	MAKE_CALL(text_addr + patch[5], AddVshItemPatchedGame);
+#if PROBE_BUILD
+	probe_logs("P6: after patch[5], pre psp_model check");
+#endif
 
 	if(psp_model == 4)
 	{
@@ -3527,15 +3794,56 @@ void PatchVshMain(u32 text_addr)
 		   umdIoOpenPatched is defined at file scope (see top of file); the
 		   original nested-function form crashed on modern psp-gcc because
 		   the function pointer was a stack-resident trampoline that the
-		   isofs driver kept calling after PatchVshMain's frame went away. */
+		   isofs driver kept calling after PatchVshMain's frame went away.
+
+		   NULL-guard the driver: on Adrenaline (PSP-emu on PS Vita, no physical
+		   UMD drive) the "isofs" driver is not registered, so sctrlHENFindDriver
+		   returns NULL and the old unconditional deref crashed the whole XMB at
+		   boot. The UMD-Update-icon hide is meaningless without a UMD drive, so
+		   simply skip it when the driver is absent. */
 		PspIoDrv* umddrv = sctrlHENFindDriver("isofs");
-		umdIoOpen = umddrv->funcs->IoOpen;
-		umddrv->funcs->IoOpen = umdIoOpenPatched;
+		if (umddrv && umddrv->funcs) {
+			umdIoOpen = umddrv->funcs->IoOpen;
+			umddrv->funcs->IoOpen = umdIoOpenPatched;
+		}
 	}
 
+#if PROBE_BUILD
+	probe_logs("M7: FW block done, pre PatchTopCategories");
+#endif
 	PatchTopCategories(text_addr);
+#if PROBE_BUILD
+	probe_logs("M8: post PatchTopCategories, pre ClearCaches");
+#endif
 
 	ClearCaches();
+
+	/* Adrenaline: the lazy skip()-context spawn of the START_AT re-add thread is
+	   rejected there (sceKernelCreateThread -> 0x800200d3). Create it here, from
+	   the module-start-handler context, which Adrenaline accepts. The thread
+	   polls scene_ctx (set later during the item walk) with a ~10s timeout, so
+	   creating it early is fine -- it just waits for the boot to progress. */
+	/* Adrenaline: create the START_AT re-add worker here. The lazy skip()-context
+	   spawn is rejected on Adrenaline: attr 0 defaults to a KERNEL thread, but the
+	   plugin's entry is a USER address (loaded ~0x09ff0000), so createthread
+	   returns ILLEGAL_ADDR. PSP_THREAD_ATTR_USER (0x80000000) creates a user
+	   thread Adrenaline accepts. The thread polls scene_ctx (set during the item
+	   walk) with a timeout, so creating it early here is fine. */
+	if (g_adrenaline && start_at_ms_flag && !ms_thread_started) {
+		SceUID tid;
+		ms_thread_started = 1;
+		tid = xmbih_create_thread("xmbih_readd", start_at_ms_thread,
+			0x18, 0x1000);
+#if PROBE_BUILD
+		probe_logx("PVM-SPAWN tid", (u32)tid);
+#endif
+		if (tid >= 0)
+			sceKernelStartThread(tid, 0, NULL);
+	}
+
+#if PROBE_BUILD
+	probe_logs("== PatchVshMain done (all patches applied) ==");
+#endif
 }
 
 int OnModuleStart(SceModule2 *mod)
@@ -3565,6 +3873,13 @@ int module_start(SceSize args, void *argp)
 {
 	devkit = sceKernelDevkitVersion();
 	psp_model = kuKernelGetModel();
+
+#if PROBE_BUILD
+	sceIoRemove(PROBE_LOG_PATH);            /* fresh log each boot */
+	probe_item_n = 0;
+	probe_logs("==== XMBIH PROBE(fix): module_start ====");
+	probe_logx("devkit", devkit);
+#endif
 
 	/* Make ini Path */
 	strcpy(ini_path, argp);
