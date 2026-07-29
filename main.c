@@ -2241,7 +2241,15 @@ static int start_at_ms_thread(SceSize args, void *argp)
 					int force = !boot_ms_established;
 					SceVshItem *it = force ? (SceVshItem *)0 :
 						game_row_item_at(gcol, c);
-					if (force || (it && (!strcmp(it->text, "msg_em") ||
+					/* Drift target = the System Storage block below MS. On a Go
+					   with internal storage that block is a whole media group
+					   (group 8): the "msg_em" root AND its game entries (gcw_*,
+					   text = the game id, not "msg_em"). Match by GROUP so drift
+					   onto a System-Storage game is corrected too, not just the
+					   root -- otherwise the boot cursor lands on the first
+					   System-Storage game and stays there. */
+					if (force || (it && (((u32)it->relocate & 0xFF) == 8 ||
+					    !strcmp(it->text, "msg_em") ||
 					    (keep_ms && !boot_user_nav && j < ms_win &&
 					     !strcmp(it->text, "msgshare_umd"))))) {
 						ms_boot_row = msr;
@@ -2647,6 +2655,7 @@ int skip(SceVshItem *item, int location)
 		return strcmp(item->text, name);
 	}
 
+
 	/* Single-hide boot stabilizer. With the count==1 layout the initial XMB
 	   item walk overruns vshmain's asynchronous icon/texture loading and faults
 	   before the XMB appears. A brief yield per item throttles the walk so the
@@ -2704,7 +2713,14 @@ int skip(SceVshItem *item, int location)
 	   must NOT enter the START_AT_MEMORY_STICK boot-hide (which would hide it and
 	   re-add it into Game). Only boot-hide the UMD when Game is its real home: a
 	   game UMD, or a movie UMD with the Movie category hidden. */
-	if (boot_hide_for_ms &&
+	/* On Adrenaline, do NOT boot-hide any Game items. The boot-hide exists only
+	   to make Memory Stick the default landing, but the active START_AT park
+	   (boot_focus + scroll-to-MS) already lands the cursor there. Hiding + re-
+	   adding here would (a) collapse EPI's two Saved Data Utility entries into two
+	   System-Storage ones and (b) re-add Game Sharing AFTER the savedata,
+	   inverting the native order. Letting everything pass through keeps EPI's
+	   correct items and native ordering; the park still snaps to Memory Stick. */
+	if (!g_adrenaline && boot_hide_for_ms &&
 	    (!idnm("msgtop_game_savedata") || !idnm("msgtop_game_gamedl") ||
 	     (!idnm("msgshare_umd") &&
 	      !(current_umd_is_video() > 0 && !hide_top_category(4))))) {
@@ -3047,56 +3063,80 @@ int AddVshItemPatched(void *a0, int topitem, SceVshItem *item)
 
 int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 {
+	int native = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 1, topitem);
 	if (maybe_suppress_media_readd(item, 1, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || keep_item(1, item))
-		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
+	if(force_trigger || keep_item(1, item)) {
+		/* Adrenaline: pass the NATIVE topitem so EPI-XmbControl's System-Storage
+		   injector (keyed on topitem 2/3/4/5) fires for the right category; the
+		   filter (from_wrapper=0) then shifts both this item and EPI's injected
+		   EF item into the compacted column. */
+		if (g_adrenaline)
+			return AddVshItem(a0, native, item);
+		g_from_wrapper = 1;
+		return AddVshItem(a0, topitem, item);
+	}
 
 	return 0;
 }
 
 int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 {
+	int native = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 2, topitem);
 	if (maybe_suppress_media_readd(item, 2, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || keep_item(2, item))
-		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
+	if(force_trigger || keep_item(2, item)) {
+		if (g_adrenaline)   /* native topitem -> EPI EF-inject keys correctly */
+			return AddVshItem(a0, native, item);
+		g_from_wrapper = 1;
+		return AddVshItem(a0, topitem, item);
+	}
 
 	return 0;
 }
 
 int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 {
+	int native = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 3, topitem);
 	if (maybe_suppress_media_readd(item, 3, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || keep_item(3, item))
-		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
+	if(force_trigger || keep_item(3, item)) {
+		if (g_adrenaline)   /* native topitem -> EPI EF-inject keys correctly */
+			return AddVshItem(a0, native, item);
+		g_from_wrapper = 1;
+		return AddVshItem(a0, topitem, item);
+	}
 
 	return 0;
 }
 
 int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 {
+	int native = topitem;
 	topitem = adjust_topitem_for_hidden_categories(topitem);
 	maybe_disable_start_at_ms_for_movie_boot(item, 4, topitem);
 	if (maybe_suppress_media_readd(item, 4, topitem))
 		return 0;
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
-	if(force_trigger || keep_item(4, item))
-		{ g_from_wrapper = 1; return AddVshItem(a0, topitem, item); }
+	if(force_trigger || keep_item(4, item)) {
+		if (g_adrenaline)   /* native topitem -> EPI EF-inject keys correctly */
+			return AddVshItem(a0, native, item);
+		g_from_wrapper = 1;
+		return AddVshItem(a0, topitem, item);
+	}
 
 	return 0;
 }
