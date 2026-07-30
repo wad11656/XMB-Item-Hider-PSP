@@ -442,7 +442,20 @@ int AddVshItemFilter(void *a0, int topitem, SceVshItem *item)
 		}
 	}
 
-	if(skip(item, 0)) {
+	/* Location for the hide check. On Adrenaline the media items arrive here
+	   directly (EPI routes them, from_wrapper==0) carrying their NATIVE topitem,
+	   and EPI's injected System-Storage item ("msg_em") arrives the same way --
+	   so derive the per-category location (Photo=1..Game=4) from the topitem.
+	   Without this, msgshare_ms / msg_em are skip-checked at location 0, where
+	   the MEMORY_STICK/SYSTEM_STORAGE rules can't match: MEMORY_STICK never hid
+	   the Memory Stick item and SYSTEM_STORAGE never hid System Storage. On ARK
+	   these items are hidden at the callsite wrapper (or forwarded with
+	   from_wrapper==1), so location 0 stays correct there. */
+	int skip_loc = 0;
+	if (g_adrenaline && !from_wrapper && topitem >= 2 && topitem <= 5 && item &&
+	    (!strcmp(item->text, "msgshare_ms") || !strcmp(item->text, "msg_em")))
+		skip_loc = topitem - 1;
+	if(skip(item, skip_loc)) {
 		int (*trampoline)(void *, int, SceVshItem *) =
 			(int(*)(void *, int, SceVshItem *))add_vsh_trampoline;
 		/* The real AddVshItem (0x22648 on 6.60) returns the row the item
@@ -3068,15 +3081,18 @@ int AddVshItemPatchedPhoto(void *a0, int topitem, SceVshItem *item)
 	maybe_disable_start_at_ms_for_movie_boot(item, 1, topitem);
 	if (maybe_suppress_media_readd(item, 1, topitem))
 		return 0;
+	/* Adrenaline: forward with the NATIVE topitem so EPI-XmbControl's System-Storage
+	   injector (keyed on topitem 2/3/4/5) fires for the right category. Do NOT hide
+	   here: EPI only injects System Storage when msgshare_ms passes through, so
+	   hiding msgshare_ms at the wrapper would make MEMORY_STICK hide System Storage
+	   too. The filter (from_wrapper=0) applies MEMORY_STICK/SYSTEM_STORAGE hiding by
+	   deriving the location from the native topitem, and shifts both this item and
+	   EPI's injected EF item into the compacted column. */
+	if (g_adrenaline)
+		return AddVshItem(a0, native, item);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(1, item)) {
-		/* Adrenaline: pass the NATIVE topitem so EPI-XmbControl's System-Storage
-		   injector (keyed on topitem 2/3/4/5) fires for the right category; the
-		   filter (from_wrapper=0) then shifts both this item and EPI's injected
-		   EF item into the compacted column. */
-		if (g_adrenaline)
-			return AddVshItem(a0, native, item);
 		g_from_wrapper = 1;
 		return AddVshItem(a0, topitem, item);
 	}
@@ -3091,11 +3107,11 @@ int AddVshItemPatchedMusic(void *a0, int topitem, SceVshItem *item)
 	maybe_disable_start_at_ms_for_movie_boot(item, 2, topitem);
 	if (maybe_suppress_media_readd(item, 2, topitem))
 		return 0;
+	if (g_adrenaline)   /* always forward; filter hides (see Photo wrapper) */
+		return AddVshItem(a0, native, item);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(2, item)) {
-		if (g_adrenaline)   /* native topitem -> EPI EF-inject keys correctly */
-			return AddVshItem(a0, native, item);
 		g_from_wrapper = 1;
 		return AddVshItem(a0, topitem, item);
 	}
@@ -3110,11 +3126,11 @@ int AddVshItemPatchedVideo(void *a0, int topitem, SceVshItem *item)
 	maybe_disable_start_at_ms_for_movie_boot(item, 3, topitem);
 	if (maybe_suppress_media_readd(item, 3, topitem))
 		return 0;
+	if (g_adrenaline)   /* always forward; filter hides (see Photo wrapper) */
+		return AddVshItem(a0, native, item);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(3, item)) {
-		if (g_adrenaline)   /* native topitem -> EPI EF-inject keys correctly */
-			return AddVshItem(a0, native, item);
 		g_from_wrapper = 1;
 		return AddVshItem(a0, topitem, item);
 	}
@@ -3129,11 +3145,11 @@ int AddVshItemPatchedGame(void *a0, int topitem, SceVshItem *item)
 	maybe_disable_start_at_ms_for_movie_boot(item, 4, topitem);
 	if (maybe_suppress_media_readd(item, 4, topitem))
 		return 0;
+	if (g_adrenaline)   /* always forward; filter hides (see Photo wrapper) */
+		return AddVshItem(a0, native, item);
 	int force_trigger = is_xmbctrl_trigger(item->text) && !xmbctrl_triggered;
 	if(force_trigger) xmbctrl_triggered = 1;
 	if(force_trigger || keep_item(4, item)) {
-		if (g_adrenaline)   /* native topitem -> EPI EF-inject keys correctly */
-			return AddVshItem(a0, native, item);
 		g_from_wrapper = 1;
 		return AddVshItem(a0, topitem, item);
 	}
