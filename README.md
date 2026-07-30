@@ -5,8 +5,9 @@
 XMB Item Hider (aka XrossMediaBar™ Item Hider) plugin for PSP. Upgraded to include option to _completely_ hide XMB categories (not just the menu items _within_ categories). One of the biggest appeals is the ability to hide the largely unused `Network` and `PlayStation®Network` (PSN) categories.
 
 Tested on:
-- 6.61 ARK-4
-- 6.61 ARK-5
+- ARK-4
+- ARK-5
+- Epinephrine (Adrenaline)
 
 ## Installation:
 1\. Download & Extract the `.zip` from [the latest Release](https://github.com/wad11656/XMB-Item-Hider-PSP/releases/latest)<br>
